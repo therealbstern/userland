@@ -197,7 +197,7 @@ struct RASPIVID_STATE_S
    int segmentWrap;                    /// Point at which to wrap segment counter
    int segmentNumber;                  /// Current segment counter
    int splitNow;                       /// Split at next possible i-frame if set to 1.
-   int splitWait;                      /// Switch if user wants splited files
+   int splitWait;                      /// Switch if user wants splitted files
 
    RASPIPREVIEW_PARAMETERS preview_parameters;   /// Preview setup parameters
    RASPICAM_CAMERA_PARAMETERS camera_parameters; /// Camera setup parameters
@@ -554,6 +554,10 @@ static int parse_cmdline(int argc, const char **argv, RASPIVID_STATE *state)
       case CommandBitrate: // 1-100
          if (sscanf(argv[i + 1], "%u", &state->bitrate) == 1)
          {
+            if (state->bitrate > MAX_BITRATE)
+            {
+               state->bitrate = MAX_BITRATE;
+            }
             i++;
          }
          else
@@ -633,7 +637,7 @@ static int parse_cmdline(int argc, const char **argv, RASPIVID_STATE *state)
             valid = 0;
          break;
       }
-      
+
       case CommandPreviewEnc:
          state->immutableInput = 0;
          break;
@@ -941,46 +945,46 @@ static void display_valid_parameters(char *app_name)
 {
    int i;
 
-   fprintf(stdout, "Display camera output to display, and optionally saves an H264 capture at requested bitrate\n\n");
-   fprintf(stdout, "\nusage: %s [options]\n\n", app_name);
+   printf("Display camera output to display, and optionally saves an H264 capture at requested bitrate\n\n");
+   printf("\nusage: %s [options]\n\n", app_name);
 
-   fprintf(stdout, "Image parameter commands\n\n");
+   printf("Image parameter commands\n\n");
 
    raspicli_display_help(cmdline_commands, cmdline_commands_size);
 
    // Profile options
-   fprintf(stdout, "\n\nH264 Profile options :\n%s", profile_map[0].mode );
+   printf("\n\nH264 Profile options :\n%s", profile_map[0].mode );
 
    for (i=1;i<profile_map_size;i++)
    {
-      fprintf(stdout, ",%s", profile_map[i].mode);
+      printf(",%s", profile_map[i].mode);
    }
 
    // Level options
-   fprintf(stdout, "\n\nH264 Level options :\n%s", level_map[0].mode );
+   printf("\n\nH264 Level options :\n%s", level_map[0].mode );
 
    for (i=1;i<level_map_size;i++)
    {
-      fprintf(stdout, ",%s", level_map[i].mode);
+      printf(",%s", level_map[i].mode);
    }
 
    // Intra refresh options
-   fprintf(stdout, "\n\nH264 Intra refresh options :\n%s", intra_refresh_map[0].mode );
+   printf("\n\nH264 Intra refresh options :\n%s", intra_refresh_map[0].mode );
 
    for (i=1;i<intra_refresh_map_size;i++)
    {
-      fprintf(stdout, ",%s", intra_refresh_map[i].mode);
+      printf(",%s", intra_refresh_map[i].mode);
    }
 
    // Raw output format options
-   fprintf(stdout, "\n\nRaw output format options :\n%s", raw_output_fmt_map[0].mode );
+   printf("\n\nRaw output format options :\n%s", raw_output_fmt_map[0].mode );
 
    for (i=1;i<raw_output_fmt_map_size;i++)
    {
-      fprintf(stdout, ",%s", raw_output_fmt_map[i].mode);
+      printf(",%s", raw_output_fmt_map[i].mode);
    }
 
-   fprintf(stdout, "\n");
+   putchar('\n');
 
    // Help for preview options
    raspipreview_display_help();
@@ -988,7 +992,7 @@ static void display_valid_parameters(char *app_name)
    // Now display any help information from the camcontrol code
    raspicamcontrol_display_help();
 
-   fprintf(stdout, "\n");
+   putchar('\n');
 
    return;
 }
@@ -2023,7 +2027,7 @@ static MMAL_STATUS_T create_encoder_component(RASPIVID_STATE *state)
          state->bitrate = MAX_BITRATE_MJPEG;
       }
    }
-   
+
    encoder_output->format->bitrate = state->bitrate;
 
    if (state->encoding == MMAL_ENCODING_H264)
@@ -2429,7 +2433,6 @@ static int wait_for_next_change(RASPIVID_STATE *state)
       return keep_running;
    }
 
-
    case WAIT_METHOD_SIGNAL:
    {
       // Need to wait for a SIGUSR1 signal
@@ -2497,7 +2500,7 @@ int main(int argc, const char **argv)
    // Do we have any parameters
    if (argc == 1)
    {
-      fprintf(stdout, "\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
+      printf("\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
 
       display_valid_parameters(basename(argv[0]));
       exit(EX_USAGE);

@@ -611,7 +611,7 @@ int raspicamcontrol_parse_cmdline(RASPICAM_CAMERA_PARAMETERS *params, const char
       params->exposureMode = exposure_mode_from_string(arg2);
       used = 2;
       break;
-      
+
    case CommandFlicker : // flicker avoid mode - needs string
       params->flickerAvoidMode = flicker_avoid_mode_from_string(arg2);
       used = 2;
@@ -738,9 +738,9 @@ int raspicamcontrol_parse_cmdline(RASPICAM_CAMERA_PARAMETERS *params, const char
          char const *s = arg2;
          char *t = &params->annotate_string[0];
          int n=0;
-         while ((c = *s++) && n < MMAL_CAMERA_ANNOTATE_MAX_TEXT_LEN_V3-1)
+         while ((c = *s++) && (n < MMAL_CAMERA_ANNOTATE_MAX_TEXT_LEN_V3 - 1))
          {
-            if (c == '\\' && *s)
+            if ((c == '\\') && *s)
             {
                switch (c = *s++)
                {
@@ -808,53 +808,53 @@ void raspicamcontrol_display_help()
 {
    int i;
 
-   fprintf(stdout, "\nImage parameter commands\n\n");
+   printf("\nImage parameter commands\n\n");
 
    raspicli_display_help(cmdline_commands, cmdline_commands_size);
 
-   fprintf(stdout, "\n\nNotes\n\nExposure mode options :\n%s", exposure_map[0].mode );
+   printf("\n\nNotes\n\nExposure mode options :\n%s", exposure_map[0].mode );
 
    for (i=1;i<exposure_map_size;i++)
    {
-      fprintf(stdout, ",%s", exposure_map[i].mode);
+      printf(",%s", exposure_map[i].mode);
    }
-   
-   fprintf(stdout, "\n\nFlicker avoid mode options :\n%s", flicker_avoid_map[0].mode );
+
+   printf("\n\nFlicker avoid mode options :\n%s", flicker_avoid_map[0].mode );
 
    for (i=1;i<flicker_avoid_map_size;i++)
    {
-      fprintf(stdout, ",%s", flicker_avoid_map[i].mode);
+      printf(",%s", flicker_avoid_map[i].mode);
    }
 
-   fprintf(stdout, "\n\nAWB mode options :\n%s", awb_map[0].mode );
+   printf("\n\nAWB mode options :\n%s", awb_map[0].mode );
 
    for (i=1;i<awb_map_size;i++)
    {
-      fprintf(stdout, ",%s", awb_map[i].mode);
+      printf(",%s", awb_map[i].mode);
    }
 
-   fprintf(stdout, "\n\nImage Effect mode options :\n%s", imagefx_map[0].mode );
+   printf("\n\nImage Effect mode options :\n%s", imagefx_map[0].mode );
 
    for (i=1;i<imagefx_map_size;i++)
    {
-      fprintf(stdout, ",%s", imagefx_map[i].mode);
+      printf(",%s", imagefx_map[i].mode);
    }
 
-   fprintf(stdout, "\n\nMetering Mode options :\n%s", metering_mode_map[0].mode );
+   printf("\n\nMetering Mode options :\n%s", metering_mode_map[0].mode );
 
    for (i=1;i<metering_mode_map_size;i++)
    {
-      fprintf(stdout, ",%s", metering_mode_map[i].mode);
+      printf(",%s", metering_mode_map[i].mode);
    }
 
-   fprintf(stdout, "\n\nDynamic Range Compression (DRC) options :\n%s", drc_mode_map[0].mode );
+   printf("\n\nDynamic Range Compression (DRC) options :\n%s", drc_mode_map[0].mode );
 
    for (i=1;i<drc_mode_map_size;i++)
    {
-      fprintf(stdout, ",%s", drc_mode_map[i].mode);
+      printf(",%s", drc_mode_map[i].mode);
    }
 
-   fprintf(stdout, "\n");
+   putchar('\n');
 }
 
 

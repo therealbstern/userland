@@ -334,6 +334,8 @@ static void default_status(RASPISTILL_STATE *state)
    }
 
    state->timeout = 5000; // 5s delay before take image
+   // state->width = 2592;
+   // state->height = 1944;
    state->quality = 85;
    state->wantRAW = 0;
    state->filename = NULL;
@@ -818,10 +820,10 @@ static int parse_cmdline(int argc, const char **argv, RASPISTILL_STATE *state)
  */
 static void display_valid_parameters(char *app_name)
 {
-   fprintf(stdout, "Runs camera for specific time, and take JPG capture at end if requested\n\n");
-   fprintf(stdout, "usage: %s [options]\n\n", app_name);
+   printf("Runs camera for specific time, and take JPG capture at end if requested\n\n");
+   printf("usage: %s [options]\n\n", app_name);
 
-   fprintf(stdout, "Image parameter commands\n\n");
+   printf("Image parameter commands\n\n");
 
    raspicli_display_help(cmdline_commands, cmdline_commands_size);
 
@@ -834,7 +836,7 @@ static void display_valid_parameters(char *app_name)
    // Now display GL preview help
    raspitex_display_help();
 
-   fprintf(stdout, "\n");
+   putchar('\n');
 
    return;
 }
@@ -1111,7 +1113,7 @@ static MMAL_STATUS_T create_camera_component(RASPISTILL_STATE *state)
       goto error;
    }
 
-   // Set the same format on the video  port (which we don't use here)
+   // Set the same format on the video port (which we don't use here)
    mmal_format_full_copy(video_port->format, format);
    status = mmal_port_format_commit(video_port);
 
@@ -1409,6 +1411,7 @@ static void add_exif_tags(RASPISTILL_STATE *state)
 
    snprintf(model_buf, 32, "IFD0.Model=RP_%s", state->camera_name);
    add_exif_tag(state, model_buf);
+   // add_exif_tag(state, "IFD0.Model=RP_OV5647");
    add_exif_tag(state, "IFD0.Make=RaspberryPi");
 
    time(&rawtime);
@@ -1772,7 +1775,7 @@ static void rename_file(RASPISTILL_STATE *state, FILE *output_file,
 int main(int argc, const char **argv)
 {
    // Our main data storage vessel..
-   RASPISTILL_STATE state = {0};
+   RASPISTILL_STATE state = { 0 };
    int exit_code = EX_OK;
 
    MMAL_STATUS_T status = MMAL_SUCCESS;
@@ -1799,7 +1802,7 @@ int main(int argc, const char **argv)
    // Do we have any parameters
    if (argc == 1)
    {
-      fprintf(stdout, "\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
+      printf("\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
 
       display_valid_parameters(basename(argv[0]));
       exit(EX_USAGE);

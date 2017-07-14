@@ -106,7 +106,7 @@ void raspicli_display_help(const COMMAND_LIST *commands, const int num_commands)
 
    for (i = 0; i < num_commands; i++)
    {
-      fprintf(stdout, "-%s, -%s\t: %s\n", commands[i].abbrev,
+      printf("-%s, -%s\t: %s\n", commands[i].abbrev,
          commands[i].command, commands[i].help);
    }
 }

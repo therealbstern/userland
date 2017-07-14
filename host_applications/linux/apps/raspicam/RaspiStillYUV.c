@@ -498,10 +498,10 @@ static int parse_cmdline(int argc, const char **argv, RASPISTILLYUV_STATE *state
  */
 static void display_valid_parameters(char *app_name)
 {
-   fprintf(stdout, "Runs camera for specific time, and take uncompressed YUV capture at end if requested\n\n");
-   fprintf(stdout, "usage: %s [options]\n\n", app_name);
+   printf("Runs camera for specific time, and take uncompressed YUV capture at end if requested\n\n");
+   printf("usage: %s [options]\n\n", app_name);
 
-   fprintf(stdout, "Image parameter commands\n\n");
+   printf("Image parameter commands\n\n");
 
    raspicli_display_help(cmdline_commands, cmdline_commands_size);
 
@@ -511,7 +511,7 @@ static void display_valid_parameters(char *app_name)
    // Now display any help information from the camcontrol code
    raspicamcontrol_display_help();
 
-   fprintf(stdout, "\n");
+   putchar('\n');
 
    return;
 }
@@ -782,7 +782,7 @@ static MMAL_STATUS_T create_camera_component(RASPISTILLYUV_STATE *state)
       goto error;
    }
 
-   // Set the same format on the video  port (which we don't use here)
+   // Set the same format on the video port (which we don't use here)
    mmal_format_full_copy(video_port->format, format);
    status = mmal_port_format_commit(video_port);
 
@@ -1221,7 +1221,7 @@ int main(int argc, const char **argv)
    // Do we have any parameters
    if (argc == 1)
    {
-      fprintf(stdout, "\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
+      printf("\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
 
       display_valid_parameters(basename(argv[0]));
       exit(EX_USAGE);
