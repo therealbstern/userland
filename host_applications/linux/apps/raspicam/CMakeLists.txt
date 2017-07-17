@@ -1,5 +1,5 @@
 
-# raspistill/raspivid/raspiyuv
+# raspistill/raspivid/raspiyuv/raspimjpeg
 
 SET(COMPILE_DEFINITIONS -Werror)
 

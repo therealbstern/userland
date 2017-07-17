@@ -554,10 +554,6 @@ static int parse_cmdline(int argc, const char **argv, RASPIVID_STATE *state)
       case CommandBitrate: // 1-100
          if (sscanf(argv[i + 1], "%u", &state->bitrate) == 1)
          {
-            if (state->bitrate > MAX_BITRATE)
-            {
-               state->bitrate = MAX_BITRATE;
-            }
             i++;
          }
          else
