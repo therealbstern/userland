@@ -3,6 +3,7 @@ Copyright (c) 2013, Broadcom Europe Ltd
 Copyright (c) 2013, Silvan Melchior
 Copyright (c) 2013, James Hughes
 Copyright (c) 2014, Ralf Schmidt
+Copyright (c) 2015, Robert Tidey
 Copyright (c) 2017, Ben Stern
 All rights reserved.
 
@@ -29,39 +30,28 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-/**
- * \file RaspiMJPEG.c
- * Command line program to capture a camera video stream and encode it to file.
- * Also optionally stream a preview of current camera input wth MJPEG.
- *
- * \date 25th Nov 2013
- * \Author: Silvan Melchior
- *
- * Description
- *
- * RaspiMJPEG is an OpenMAX-Application based on the mmal-library, which is
- * comparable to and inspired by RaspiVid and RaspiStill. RaspiMJPEG can record
- * 1080p 30fps videos and 5 Mpx images into a file. But instead of showing the
- * preview on a screen, RaspiMJPEG streams the preview as MJPEG into a file.
- * The update-rate and the size of the preview are customizable with parameters
- * and independent of the image/video. Once started, the application receives
- * commands with a unix-pipe and showes its status on stdout and writes it into
- * a status-file. The program terminates itself after receiving a SIGINT or
- * SIGTERM.
- *
- * Usage information in README_RaspiMJPEG.md
- *
- *
- * General connection overview:
- *
- *                       OUT -->  IN       OUT --> IN             ATTACHED
- *   --------------------------------------------------------------------------------------------
- *   camera port 0 / preview --> image resizer --> JPEG encoder 1 <-- callback 1 to save JPEG
- *   camera port 1 / video                     --> H264 encoder   <-- callback to save video file
- *   camera port 2 / stills                    --> JPEG encoder 2 <-- callback 2 to save JPEG
- */
+/* Command line program to capture a camera video stream and encode it to file.
+Also optionally stream a preview of current camera input with MJPEG.
 
-#define VERSION "4.2.3"
+RaspiMJPEG is an OpenMAX-Application based on the mmal-library, which is
+comparable to and inspired by RaspiVid and RaspiStill.  RaspiMJPEG can record
+1080p 30fps videos and 5 Mpx images into a file.  Instead of showing the preview
+on a screen, RaspiMJPEG streams the preview as MJPEG into a file.  The
+update-rate and the size of the preview are customizable with parameters and
+independent of the image/video.  Once started, the application receives commands
+with a unix-pipe and showes its status on stdout and writes it into a
+status-file. The program terminates itself after receiving a SIGINT or SIGTERM.
+
+Usage information is in README_RaspiMJPEG.md
+
+
+General connection overview:
+
+Camera Port      OUT -->  IN       OUT --> IN             ATTACHED
+--------------------------------------------------------------------------------
+0 / preview --> image resizer --> JPEG encoder 1 <-- callback 1 to save JPEG
+1 / video                     --> H264 encoder   <-- callback to save video file
+2 / stills                    --> JPEG encoder 2 <-- callback 2 to save JPEG */
 
 // We use some GNU extensions (asprintf)
 #define _GNU_SOURCE
@@ -74,10 +64,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <signal.h>
 #include <fcntl.h>
 #include <time.h>
+#include <dirent.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/statvfs.h>
 #include <errno.h>
+#include <sysexits.h>
 
 #include "bcm_host.h"
 #include "interface/vcos/vcos.h"
@@ -89,82 +82,80 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "interface/mmal/util/mmal_default_components.h"
 #include "interface/mmal/util/mmal_connection.h"
 
-// Standard port setting for the camera component
-#define PREVIEW_PORT 0
-#define VIDEO_PORT 1
-#define CAPTURE_PORT 2
+#include "RaspiMJPEG.h"
 
-// default settings
-#define MJPG_DEF_CFG_FILE  "/etc/raspimjpeg"
+MMAL_STATUS_T status;
+/* time_t currTime; */
+struct tm *gmTime;
+struct timespec currTime;
+char readbuf[FIFO_MAX][2 * MAX_COMMAND_LEN], header_bytes[29];
 
-// helper macros
-#define DIM(x)  (sizeof(x) / sizeof(x[0]))
-#define TESTERR(cond, s) { if (cond) { error(s, __function__, __LINE__); } }
-#define MMAL_STATUS(s) { if (status != MMAL_SUCCESS) { error(s, __FUNCTION__, __LINE__); } }
-#define S(x) #x
-#define SS(x) S(x)
- 
-struct cam_settings {
-    unsigned int sharpness;
-    unsigned int contrast;
-    unsigned int brightness;
-    unsigned int saturation;
-    unsigned int iso;
-    unsigned int vs;
-    unsigned int ec;
-    unsigned int rotation;
-    unsigned int quality;
-    unsigned int raw;
-    unsigned int ce_en;
-    unsigned int ce_u;
-    unsigned int ce_v;
-    unsigned int hflip;
-    unsigned int vflip;
-    unsigned int annback;
-    char em[20];
-    char wb[20];
-    char ie[20];
-    char mm[20];
-    unsigned long int bitrate;
-    unsigned long int roi_x;
-    unsigned long int roi_y;
-    unsigned long int roi_w;
-    unsigned long int roi_h;
-    unsigned long int ss;
-    char *annotation;
-} cset = {
+int cb_len, cb_wptr, cb_wrap, iframe_buff[IFRAME_BUFSIZE], iframe_buff_wpos,
+    iframe_buff_rpos, header_wptr, fd[FIFO_MAX], readi[FIFO_MAX],
+    time_between_pic, motion_width, motion_height,
+    motion_img_width, motion_img_height, motion_frame_count, motion_changes,
+    motion_state, vector_buffer_index, mask_valid;
+unsigned int video_frame;
+char *box_files[MAX_BOX_FILES], *cfg_strd[KEY_COUNT + 1],
+    *cfg_stru[KEY_COUNT + 1];
+unsigned char *vector_buffer, *mask_buffer_mem, *mask_buffer;
+long int cfg_val[KEY_COUNT + 1];
+
+MMAL_COMPONENT_T *camera = NULL, *jpegencoder = NULL, *jpegencoder2 = NULL,
+    *h264encoder = NULL, *resizer = NULL, *null_sink = NULL,
+    *splitter = NULL;
+MMAL_CONNECTION_T *con_cam_pre = NULL, *con_spli_res = NULL, *con_spli_h264 = NULL,
+    *con_cam_res = NULL, *con_res_jpeg = NULL, *con_cam_h264 = NULL,
+    *con_cam_jpeg = NULL;
+MMAL_POOL_T *pool_jpegencoder = NULL, *pool_jpegencoder_in = NULL,
+    *pool_jpegencoder2 = NULL, *pool_h264encoder = NULL;
+FILE *jpegoutput_file = NULL, *jpegoutput2_file = NULL,
+    *h264output_file = NULL, *status_file = NULL, *vector_file = NULL;
+int box_head = 0, box_tail = 0;
+char *cb_buff = NULL, *filename_recording = NULL, *filename_image = NULL,
+    *jpeg_filename = NULL, *jpeg2_filename = NULL, *h264_filename = NULL,
+    *pipe_filename = NULL, *status_filename = NULL, *space_limit = NULL;
+char jpeg2_root = 0;
+unsigned char timelapse = 0, mp4box = 0, autostart = 1, quality = 85,
+    idle = 0, capturing = 0, motion_detection = 0, a_error = 0, v_capturing = 0,
+    i_capturing = 0, v_boxing = 0, buffering = 0, buffering_toggle = 0;
+unsigned int tl_cnt = 0, mjpeg_cnt = 0, width = 320, divider = 5, image_cnt = 0,
+    image2_cnt = 0, video_cnt = 0, lapse_cnt = 0, video_stoptime = 0,
+    video_width = 1920, video_height = 1080, video_fps = 25, MP4Box_fps = 25,
+    image_width = 2592, image_height = 1944;
+volatile int running = 1;
+
+struct cam_settings cset = {
     0, 0, 50, 0, 0, 0, 0, 0, 85, 0, 0, 128, 128, 0, 0, 0, "auto", "auto",
     "none", "average", 17000000, 0, 0, 65536, 65536, 0, NULL,
 };
 
-MMAL_STATUS_T status;
-MMAL_COMPONENT_T *camera = NULL, *jpegencoder = NULL,
-    *jpegencoder2 = NULL, *h264encoder = NULL, *resizer = NULL;
-MMAL_CONNECTION_T *con_cam_res, *con_res_jpeg, *con_cam_h264, *con_cam_jpeg;
-MMAL_POOL_T *pool_jpegencoder, *pool_jpegencoder2, *pool_h264encoder;
-FILE *jpegoutput_file = NULL, *jpegoutput2_file = NULL,
-    *h264output_file = NULL, *status_file = NULL;
-unsigned int tl_cnt = 0, mjpeg_cnt = 0, width = 320, divider = 5, image_cnt = 0,
-    image2_cnt = 0, video_cnt = 0;
-unsigned int video_width = 1920, video_height = 1080, video_fps = 25,
-    MP4Box_fps = 25, image_width = 2592, image_height = 1944;
-char *jpeg_filename = NULL, *jpeg2_filename = NULL, *h264_filename = NULL,
-    *pipe_filename = NULL, *status_filename = NULL, *space_limit = NULL,
-    jpeg2_root = 0;
-unsigned char timelapse = 0, mp4box = 0, autostart = 1, quality = 85,
-    idle = 0, capturing = 0, motion_detection = 0;
-int time_between_pic;
-time_t currTime;
-struct tm *localTime;
-volatile int running = 1;
-
-/* Struct used to pass information in encoder port userdata to callback */
-typedef struct port_userdata {
-    FILE *file_handle;          // File handle to write buffer data to.
-    VCOS_SEMAPHORE_T complete_semaphore;        // semaphore which is posted when we reach end of frame (indicates end of capture or fault)
-} PORT_USERDATA;
-
 PORT_USERDATA callback_data;
+
+char *cfg_key[] = { "annotation", "anno_background",
+    "anno3_custom_background_colour", "anno3_custom_background_Y",
+    "anno3_custom_background_U", "anno3_custom_background_V",
+    "anno3_custom_text_colour", "anno3_custom_text_Y", "anno3_custom_text_U",
+    "anno3_custom_text_V", "anno_text_size", "sharpness", "contrast",
+    "brightness", "saturation", "iso", "metering_mode", "video_stabilisation",
+    "exposure_compensation", "exposure_mode", "white_balance", "image_effect",
+    "autowbgain_r", "autowbgain_b", "colour_effect_en", "colour_effect_u",
+    "colour_effect_v", "rotation", "hflip", "vflip", "sensor_region_x",
+    "sensor_region_y", "sensor_region_w", "sensor_region_h", "video_width",
+    "video_height", "video_fps", "video_bitrate", "video_buffer", "video_split",
+    "MP4Box", "MP4Box_fps", "boxing_path", "MP4Box_cmd", "image_width",
+    "image_height", "image_quality", "tl_interval", "base_path", "preview_path",
+    "image_path", "lapse_path", "video_path", "status_file", "control_file",
+    "media_path", "macros_path", "subdir_char", "thumb_gen", "autostart",
+    "motion_detection", "motion_file", "vector_preview", "vector_mode",
+    "motion_external", "motion_noise", "motion_threshold", "motion_image",
+    "motion_startframes", "motion_stopframes", "motion_pipe", "motion_clip",
+    "motion_logfile", "user_config", "log_file", "log_size",
+    "watchdog_interval", "watchdog_errors", "h264_buffer_size", "h264_buffers",
+    "callback_timeout", "error_soft",  "error_hard",  "start_img",  "end_img",
+    "start_vid",  "end_vid",  "end_box",  "do_cmd", "motion_event", "startstop",
+    "camera_num", "stat_pass", "user_annotate", "count_format", "minimise_frag",
+    "mmal_logfile", "stop_pause" };
 
 void cam_set_annotation();
 void stop_all(void);
@@ -180,11 +171,169 @@ void error(const char *string, const char *where, int line) {
         }
     }
     stop_all();
-    exit(1);
+    exit(EX_SOFTWARE);
 }
 
 void term(int signum) {
     running = 0;
+}
+
+void set_counts() {
+    image2_cnt = findNextCount(cfg_stru[c_image_path], "it");
+    video_cnt = findNextCount(cfg_stru[c_video_path], "v");
+}
+
+int getKey(char *key) {
+    int i;
+
+    for (i = 0; i < KEY_COUNT; i++) {
+        if (!strcmp(key, cfg_key[i])) {
+            return i;
+        }
+    }
+    return KEY_COUNT;
+}
+
+void addValue(int keyI, char *value, int both) {
+    int val;
+
+    free(cfg_stru[keyI]);
+    cfg_stru[keyI] = NULL;
+
+    if (both) {
+        free(cfg_strd[keyI]);
+        cfg_strd[keyI] = NULL;
+    }
+
+    if (value == NULL || !value[0]) {
+        cfg_val[keyI] = NULL;
+    } else {
+        val = strtol(value, NULL, 10);
+        asprintf(&cfg_stru[keyI], "%s", value);
+        if (both) {
+            asprintf(&cfg_strd[keyI], "%s", value);
+        }
+        if (!strcmp(value, "true")) {
+            val = 1;
+        } else if (!strcmp(value, "false")) {
+            val = 0;
+        }
+        switch (keyI) {
+            case c_autostart:
+                if (!strcmp(value, "idle")) {
+                    val = 0;
+                    idle = 1;
+                } else if (!strcmp(value, "standard")) { 
+                    val = 1;
+                    idle = 0;
+                }
+                updateStatus();
+                break;
+            case c_MP4Box:
+                if (!strcmp(value, "background")) {
+                    val = 2;
+                }
+        }
+        cfg_val[keyI] = val;
+    }
+}
+
+void addUserValue(int key, char *value){
+    DPRINTF(1, "Change: %s = %s\n", cfg_key[key], value);
+    addValue(key, value, 0);
+}
+
+void saveUserConfig(char *cfilename) {
+    FILE *fp;
+    int i;
+
+    fp = fopen(cfilename, "w");
+    if (fp != NULL) {
+        for (i = 0; i < KEY_COUNT; i++) {
+            if (cfg_key[i][0]) {
+                if ((cfg_stru[i] == NULL) && (cfg_strd[i] == NULL)) {
+                    next;
+                }
+                if (cfg_stru[i] == NULL) {
+                    fprintf(fp, "%s\n", cfg_key[i]);
+                } else if ((cfg_strd[i] == NULL) ||
+                    strcmp(cfg_strd[i], cfg_stru[i])) {
+                    fprintf(fp, "%s %s\n", cfg_key[i], cfg_stru[i]);
+                }
+            }
+        }
+        fclose(fp);
+    }
+}
+
+void read_config(char *cfilename, int type) {
+    FILE *fp;
+    int length;
+    int key;
+    unsigned int len = 0;
+    char *line = NULL;
+    char *value = NULL;
+    int lineno = 0;
+
+    fp = fopen(cfilename, "r");
+    if (fp != NULL) {
+        // XXX dike this out and use fgets like a normal human being
+        while ((length = getline(&line, &len, fp)) != -1) {
+            lineno++;
+            if (length > 3 && *line != '#') {
+                line[length - 1] = 0;
+                value = strchr(line, ' ');
+                if (value != NULL) {
+                    // split line into key, value
+                    *value = 0;
+                    value++;
+                }
+                key = getKey(line);
+                if (key < KEY_COUNT) {
+                    if (key != c_annotation) {
+                        value = trim(value);
+                    }
+                    addValue(key, value, type);
+                } else {
+                    fprintf(stderr,
+                        "Unknown command in config file at line %d: %s\n",
+                        lineno, line);
+                }
+            }
+        }
+        if (line != NULL) {
+            free(line);
+            line = NULL;
+        }
+    }    
+}
+
+void checkPipe(int pipe) {
+    char *lf;
+    int length, hPipe;
+
+    hPipe = fd[pipe];
+    if (hPipe >= 0) {
+        length = read(hPipe, readbuf[pipe] + readi[pipe], MAX_COMMAND_LEN - 2);
+        if (length > 0) readi[pipe] +=length;
+
+        if (readi[pipe] != 0) {
+            lf = strchr(readbuf[pipe], 10);
+            if (lf != NULL) {
+                *lf = 0;
+                length = lf - readbuf[pipe];
+                readi[pipe] -= length + 1;
+                process_cmd(readbuf[pipe], length);
+                length = readbuf[pipe] + 2 * MAX_COMMAND_LEN - 1 - lf;
+                strncpy(readbuf[pipe], lf + 1, length);
+            } else {
+                if (length == 0) {
+                    process_cmd(readbuf[pipe], readi[pipe]);
+                    readi[pipe] = 0;			
+                }
+            }
+        }
+    }
 }
 
 static void camera_control_callback(MMAL_PORT_T *port,
@@ -196,25 +345,21 @@ static void camera_control_callback(MMAL_PORT_T *port,
 
 static void jpegencoder_buffer_callback(MMAL_PORT_T *port,
     MMAL_BUFFER_HEADER_T *buffer) {
-    int bytes_written = buffer->length;
     char *filename_temp, *filename_temp2;
+    int bytes_written = buffer->length;
+    MMAL_STATUS_T status = MMAL_SUCCESS;
+    MMAL_BUFFER_HEADER_T *new_buffer;
 
     if (mjpeg_cnt == 0) {
-        if (!jpegoutput_file) {
-            asprintf(&filename_temp, jpeg_filename, image_cnt);
+        if (jpegoutput_file == NULL) {
+            asprintf(&filename_temp, cfg_stru[c_preview_path], image_cnt);
             asprintf(&filename_temp2, "%s.part", filename_temp);
             jpegoutput_file = fopen(filename_temp2, "wb");
-            if (filename_temp != NULL) {
-                free(filename_temp);
-                filename_temp = NULL;
-            }
-            if (filename_temp2 != NULL) {
-                free(filename_temp2);
-                filename_temp2 = NULL;
-            }
-            if (!jpegoutput_file) {
-                error("Could not open mjpeg-destination");
-            }
+            free(filename_temp);
+            filename_temp = NULL;
+            free(filename_temp2);
+            filename_temp2 = NULL;
+            TESTERR(jpegoutput_file == NULL, "Could not open mjpeg-destination");
         }
         if (buffer->length) {
             mmal_buffer_header_mem_lock(buffer);
@@ -222,22 +367,27 @@ static void jpegencoder_buffer_callback(MMAL_PORT_T *port,
                 jpegoutput_file);
             mmal_buffer_header_mem_unlock(buffer);
         }
-        TESTERR(bytes_written != buffer->length, "Could not write all bytes");
+        TESTERR(bytes_written != buffer->length,
+            "Could not write all bytes to jpeg");
     }
 
     if (buffer->flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
         MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)) {
         mjpeg_cnt++;
-        if (mjpeg_cnt == divider) {
-            fclose(jpegoutput_file);
-            jpegoutput_file = NULL;
-            asprintf(&filename_temp, jpeg_filename, image_cnt);
-            asprintf(&filename_temp2, "%s.part", filename_temp);
-            rename(filename_temp2, filename_temp);
-            free(filename_temp);
-            filename_temp = NULL;
-            free(filename_temp2);
-            filename_temp2 = NULL;
+        video_frame++;
+        if (video_frame >= cfg_val[c_video_fps]) {
+            video_frame = 0;
+        }
+        if (mjpeg_cnt == cfg_val[c_divider]) {
+            if (jpegoutput_file != NULL) {
+                fclose(jpegoutput_file);
+                jpegoutput_file = NULL;
+                asprintf(&filename_temp, cfg_stru[c_preview_path], image_cnt);
+                asprintf(&filename_temp2, "%s.part", filename_temp);
+                rename(filename_temp2, filename_temp);
+                free(filename_temp);
+                free(filename_temp2);
+            }
             image_cnt++;
             mjpeg_cnt = 0;
             cam_set_annotation();
@@ -247,43 +397,43 @@ static void jpegencoder_buffer_callback(MMAL_PORT_T *port,
     mmal_buffer_header_release(buffer);
 
     if (port->is_enabled) {
-        MMAL_STATUS_T status = MMAL_SUCCESS;
-        MMAL_BUFFER_HEADER_T *new_buffer;
-
         new_buffer = mmal_queue_get(pool_jpegencoder->queue);
-        if (new_buffer) {
+        if (new_buffer != NULL) {
             status = mmal_port_send_buffer(port, new_buffer);
         }
-        TESTERR((!new_buffer) || (status != MMAL_SUCCESS),
+        TESTERR((new_buffer == NULL) || (status != MMAL_SUCCESS),
             "Could not send buffers to port");
     } else {
-        fprintf(stderr,
-            "%s: %d: ERROR - port disabled, could not get/send buffer\n",
-            __function__, __LINE__);
+        DPRINTF(1, "%s: %d: ERROR: port disabled, could not get/send buffer\n");
+    }
 }
 
-static void
-jpegencoder2_buffer_callback(MMAL_PORT_T * port,
-    MMAL_BUFFER_HEADER_T * buffer) {
+static void jpegencoder2_buffer_callback(MMAL_PORT_T *port,
+    MMAL_BUFFER_HEADER_T *buffer) {
+    MMAL_BUFFER_HEADER_T *new_buffer;
     int complete = 0;
+    MMAL_STATUS_T status = MMAL_SUCCESS;
     int bytes_written = buffer->length;
     PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
 
     if (pData != NULL) {
         if (buffer->length) {
             mmal_buffer_header_mem_lock(buffer);
-            bytes_written = fwrite(buffer->data, 1, buffer->length,
-                jpegoutput2_file);
+            if (jpegoutput2_file != NULL) {
+                bytes_written = fwrite(buffer->data, 1, buffer->length,
+                    jpegoutput2_file);
+            } else {
+                bytes_written = 0
+            }
             mmal_buffer_header_mem_unlock(buffer);
         }
         if (bytes_written != buffer->length) {
             complete = 1;
-            error("Could not write all bytes", __function__, __LINE__);
+            DPERROR(1, "Could not write all bytes");
         }
 
-        if (buffer->
-            flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
-                MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)) {
+        if (buffer->flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
+            MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)) {
             fclose(jpegoutput2_file);
             if (status_filename != 0) {
                 if (!timelapse) {
@@ -301,8 +451,7 @@ jpegencoder2_buffer_callback(MMAL_PORT_T * port,
     }
 
     // Do not forget to check image end to cleanup state.
-    if (buffer->
-        flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
+    if (buffer->flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
             MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)) {
         complete = 1;
         capturing = 0;
@@ -311,33 +460,31 @@ jpegencoder2_buffer_callback(MMAL_PORT_T * port,
     mmal_buffer_header_release(buffer);
 
     if (port->is_enabled) {
-        MMAL_STATUS_T status = MMAL_SUCCESS;
-        MMAL_BUFFER_HEADER_T *new_buffer;
-
         new_buffer = mmal_queue_get(pool_jpegencoder2->queue);
-
-        if (new_buffer) {
+        if (new_buffer != NULL) {
             status = mmal_port_send_buffer(port, new_buffer);
         }
-        TESTERR((!new_buffer) || (status != MMAL_SUCCESS),
+        TESTERR((new_buffer == NULL) || (status != MMAL_SUCCESS),
             "Could not send buffers to port");
     } else {
-        fprintf(stderr,
-            "%s: %d: TESTERR - port disabled, could not get/send buffer\n",
-            __function__, __LINE__);
+        DPRINTF(1, "%s: %d: ERROR: port disabled, could not get/send buffer\n");
     }
     if (complete) {
-        // fprintf(stderr, "%s: %d: vcos_semaphore_post\n",
-        //    __function__, __LINE__);
         vcos_semaphore_post(&(pData->complete_semaphore));
     }
 }
 
 static void h264encoder_buffer_callback(MMAL_PORT_T *port,
     MMAL_BUFFER_HEADER_T *buffer) {
-    int bytes_written = buffer->length;
-    MMAL_STATUS_T status = MMAL_SUCCESS;
+    int i, p, row, col;
     MMAL_BUFFER_HEADER_T *new_buffer;
+    int bytes_written = buffer->length;
+    int space_in_buff = cb_len - cb_wptr;
+    int copy_to_end = space_in_buff > buffer->length ? buffer->length : space_in_buff;
+    int copy_to_start = buffer->length - copy_to_end;
+    MMAL_STATUS_T status = MMAL_SUCCESS;
+    static int frame_start = -1, no_iframe_bytes = 0, iframe_requested = 0,
+        no_buffer = 0;
 
     if (buffer->length) {
         mmal_buffer_header_mem_lock(buffer);
@@ -351,19 +498,17 @@ static void h264encoder_buffer_callback(MMAL_PORT_T *port,
     mmal_buffer_header_release(buffer);
 
     if (port->is_enabled) {
-        MMAL_STATUS_T status = MMAL_SUCCESS;
-        MMAL_BUFFER_HEADER_T *new_buffer;
-
         new_buffer = mmal_queue_get(pool_h264encoder->queue);
-        if (new_buffer) {
+        if (new_buffer != NULL) {
             status = mmal_port_send_buffer(port, new_buffer);
         }
-        TESTERR((!new_buffer) || (status != MMAL_SUCCESS),
-            "Could not send buffers to port");
+        if ((new_buffer != NULL) || (status != MMAL_SUCCESS)) {
+            DPERROR(1, "Could not send buffers to port");
+        }
     }
 }
 
-void cam_set_sharpness() {
+inline void cam_set_sharpness() {
     MMAL_RATIONAL_T value = { cset.sharpness, 100 };
 
     status = mmal_port_parameter_set_rational(camera->control,
@@ -371,7 +516,7 @@ void cam_set_sharpness() {
     MMAL_STATUS("Could not set sharpness");
 }
 
-void cam_set_contrast() {
+inline void cam_set_contrast() {
     MMAL_RATIONAL_T value = { cset.contrast, 100 };
 
     status = mmal_port_parameter_set_rational(camera->control,
@@ -379,7 +524,7 @@ void cam_set_contrast() {
     MMAL_STATUS("Could not set contrast");
 }
 
-void cam_set_brightness() {
+inline void cam_set_brightness() {
     MMAL_RATIONAL_T value = { cset.brightness, 100 };
 
     status = mmal_port_parameter_set_rational(camera->control,
@@ -387,34 +532,33 @@ void cam_set_brightness() {
     MMAL_STATUS("Could not set brightness");
 }
 
-void cam_set_saturation() {
+inline void cam_set_saturation() {
     MMAL_RATIONAL_T value = { cset.saturation, 100 };
 
     status = mmal_port_parameter_set_rational(camera->control,
         MMAL_PARAMETER_SATURATION, value);
-    if (status != MMAL_SUCCESS)
-        error("Could not set saturation");
+    MMAL_STATUS("Could not set saturation");
 }
 
-void cam_set_iso() {
+inline void cam_set_iso() {
     status = mmal_port_parameter_set_uint32(camera->control,
         MMAL_PARAMETER_ISO, cset.iso);
     MMAL_STATUS("Could not set ISO");
 }
 
-void cam_set_vs() {
+inline void cam_set_vs() {
     status = mmal_port_parameter_set_boolean(camera->control,
         MMAL_PARAMETER_VIDEO_STABILISATION, cset.vs);
     MMAL_STATUS("Could not set video stabilisation");
 }
 
-void cam_set_ec() {
+inline void cam_set_ec() {
     status = mmal_port_parameter_set_int32(camera->control,
         MMAL_PARAMETER_EXPOSURE_COMP, cset.ec);
     MMAL_STATUS("Could not set exposure compensation");
 }
 
-void cam_set_em() {
+inline void cam_set_em() {
     MMAL_PARAMETER_EXPOSUREMODE_T exp = { {MMAL_PARAMETER_EXPOSURE_MODE,
         sizeof (MMAL_PARAMETER_EXPOSUREMODE_T)}
     };
@@ -446,13 +590,14 @@ void cam_set_em() {
     } else if (!strcmp(cset.em, "fireworks")) {
         exp.value = MMAL_PARAM_EXPOSUREMODE_FIREWORKS;
     } else {
-        error("Invalid exposure mode", __function__, __LINE);
+        DPRINTF(1, "Invalid exposure mode: %s\n", cset.em);
+        exit(EX_CONFIG);
     }
     status = mmal_port_parameter_set(camera->control, &exp);
     MMAL_STATUS("Could not set exposure mode");
 }
 
-void cam_set_wb() {
+inline void cam_set_wb() {
     MMAL_PARAMETER_AWBMODE_T awb = {
         { MMAL_PARAMETER_AWB_MODE, sizeof (MMAL_PARAMETER_AWBMODE_T) }
     };
@@ -478,13 +623,14 @@ void cam_set_wb() {
     } else if (!strcmp(cset.wb, "horizon")) {
         awb.value = MMAL_PARAM_AWBMODE_HORIZON;
     } else {
-        error("Invalid white balance", __function__, __LINE__);
+        DPRINTF(1, "Invalid white balance: %s\n", cset.wb);
+        exit(EX_CONFIG);
     }
     status = mmal_port_parameter_set(camera->control, &param.hdr);
     MMAL_STATUS("Could not set white balance");
 }
 
-void cam_set_mm() {
+inline void cam_set_mm() {
     MMAL_PARAMETER_EXPOSUREMETERINGMODE_T m_mode = { {
         MMAL_PARAMETER_EXP_METERING_MODE,
         sizeof (MMAL_PARAMETER_EXPOSUREMETERINGMODE_T)
@@ -499,13 +645,14 @@ void cam_set_mm() {
     } else if (!strcmp(cset.mm, "matrix")) {
         m_mode.value = MMAL_PARAM_EXPOSUREMETERINGMODE_MATRIX;
     } else {
-        error("Invalid metering mode");
+        DPRINTF(1, "Invalid metering mode: %s\n", cset.mm);
+        exit(EX_CONFIG);
     }
     status = mmal_port_parameter_set(camera->control, &m_mode);
     MMAL_STATUS("Could not set metering mode");
 }
 
-void cam_set_ie() {
+inline void cam_set_ie() {
     MMAL_PARAMETER_IMAGEFX_T imageFX = {
         { MMAL_PARAMETER_IMAGE_EFFECT, sizeof (MMAL_PARAMETER_IMAGEFX_T) }
     };
@@ -551,7 +698,8 @@ void cam_set_ie() {
     } else if (!strcmp(cset.ie, "cartoon")) {
         imageFX.value = MMAL_PARAM_IMAGEFX_CARTOON;
     } else {
-        error("Invalid image effect");
+        DPRINTF(1, "Invalid image effect: %s\n", cset.ie);
+        exit(EX_CONFIG);
     }
     status = mmal_port_parameter_set(camera->control, &imageFX);
     MMAL_STATUS("Could not set image effect");
@@ -598,11 +746,11 @@ void cam_set_flip() {
         mirror.value = MMAL_PARAM_MIRROR_VERTICAL;
     }
     status = mmal_port_parameter_set(camera->output[PREVIEW_PORT], &mirror);
-    MMAL_STATUS("Could not set flip (" S(PREVIEW_PORT) ")");
+    MMAL_STATUS("Could not set flip (" SS(PREVIEW_PORT) ")");
     status = mmal_port_parameter_set(camera->output[VIDEO_PORT], &mirror);
-    MMAL_STATUS("Could not set flip (" S(VIDEO_PORT) ")");
+    MMAL_STATUS("Could not set flip (" SS(VIDEO_PORT) ")");
     status = mmal_port_parameter_set(camera->output[CAPTURE_PORT], &mirror.hdr);
-    MMAL_STATUS("Could not set flip (" S(CAPTURE_PORT) ")");
+    MMAL_STATUS("Could not set flip (" SS(CAPTURE_PORT) ")");
 }
 
 void cam_set_roi() {
@@ -613,7 +761,7 @@ void cam_set_roi() {
     crop.rect.y = cset.roi_y;
     crop.rect.width = cset.roi_w;
     crop.rect.height = cset.roi_h;
-    status = mmal_port_parameter_set(camera->control, &crop.hdr);
+    status = mmal_port_parameter_set(camera->control, &crop);
     MMAL_STATUS("Could not set sensor area");
 }
 
@@ -638,8 +786,7 @@ void cam_set_raw() {
 void cam_set_bitrate() {
     h264encoder->output[0]->format->bitrate = cset.bitrate;
     status = mmal_port_format_commit(h264encoder->output[0]);
-    if (status != MMAL_SUCCESS)
-        error("Could not set bitrate");
+    MMAL_STATUS("Could not set bitrate");
 }
 
 /* Checks if specified port is valid and enabled, then disables it.
@@ -651,89 +798,133 @@ static void check_disable_port(MMAL_PORT_T *port) {
 }
 
 void cam_set_annotation() {
-    char *filename_temp;
-    MMAL_PARAMETER_CAMERA_ANNOTATE_V2_T anno =
-        { {MMAL_PARAMETER_ANNOTATE,
-                sizeof (MMAL_PARAMETER_CAMERA_ANNOTATE_V2_T)}
-    };
+    MMAL_PARAMETER_CAMERA_ANNOTATE_V3_T anno = { {
+        MMAL_PARAMETER_ANNOTATE, sizeof (MMAL_PARAMETER_CAMERA_ANNOTATE_V3_T)
+    } };
+    char *filename_temp = NULL;
+    int prev_sec = gmTime->tm_sec;
 
-    if (cset.annotation != 0) {
+    if (cfg_stru[c_annotation]) {
         currTime = time(NULL);
-        localTime = localtime(&currTime);
+        gmTime = gmtime(&currTime);
+        if (localTime->tm_sec != prev_sec) {
+            video_frame = 0;
+        }
         asprintf(&filename_temp, cset.annotation,
-            localTime->tm_year + 1900, localTime->tm_mon + 1,
-            localTime->tm_mday, localTime->tm_hour, localTime->tm_min,
-            localTime->tm_sec);
-        anno.enable = 1;
+            gmTime->tm_year + 1900, gmTime->tm_mon + 1,
+            gmTime->tm_mday, gmTime->tm_hour, gmTime->tm_min,
+            gmTime->tm_sec);
         strcpy(anno.text, filename_temp);
         free(filename_temp);
+        anno.enable = MMAL_TRUE;
+        anno.show_shutter = 0;
+        anno.show_analog_gain = 0;
+        anno.show_lens = 0;
+        anno.show_caf = 0;
+        anno.show_motion = 0;
+        anno.enable_text_background = cfg_val[c_anno_background];
+        anno.custom_background_colour = cfg_val[c_anno3_custom_background_colour];
+        anno.custom_background_Y = cfg_val[c_anno3_custom_background_Y];
+        anno.custom_background_U = cfg_val[c_anno3_custom_background_U];
+        anno.custom_background_V = cfg_val[c_anno3_custom_background_V];
+        anno.custom_text_colour = cfg_val[c_anno3_custom_text_colour];
+        anno.custom_text_Y = cfg_val[c_anno3_custom_text_Y];
+        anno.custom_text_U = cfg_val[c_anno3_custom_text_U];
+        anno.custom_text_V = cfg_val[c_anno3_custom_text_V];
+        anno.text_size = cfg_val[c_anno_text_size];
     } else {
-        anno.enable = 0;
+        anno.enable = MMAL_FALSE;
     }
-    anno.show_shutter = 0;
-    anno.show_analog_gain = 0;
-    anno.show_lens = 0;
-    anno.show_caf = 0;
-    anno.show_motion = 0;
-    anno.black_text_background = cset.annback;
 
-    status = mmal_port_parameter_set(camera->control, &anno.hdr);
-    if (status != MMAL_SUCCESS)
-        error("Could not set annotation");
+
+    status = mmal_port_parameter_set(camera->control, &anno);
+    MMAL_STATUS("Could not set annotation");
 }
 
-void start_all(void) {
+void start_all(int load_conf) {
+    int max, i, h264_size;
+    unsigned int height_temp;
     MMAL_ES_FORMAT_T *format;
-    int max, i;
     VCOS_STATUS_T vcos_status;
+    MMAL_BUFFER_HEADER_T *jpegbuffer2;
+    MMAL_PARAMETER_INT32_T cam_num = { {
+        MMAL_PARAMETER_CAMERA_NUM, sizeof (MMAL_PARAMETER_INT32_T)
+    } };
+    MMAL_PARAMETER_UINT32_T veiq = { {
+        MMAL_PARAMETER_VIDEO_ENCODE_INITIAL_QUANT,
+        sizeof (MMAL_PARAMETER_UINT32_T)
+    }, 25 }, veqp = { {
+        MMAL_PARAMETER_VIDEO_ENCODE_QP_P, sizeof (MMAL_PARAMETER_UINT32_T)
+    }, 31 };
+    MMAL_PARAMETER_CAMERA_CONFIG_T cam_config = { {
+        MMAL_PARAMETER_CAMERA_CONFIG,
+        sizeof (MMAL_PARAMETER_CAMERA_CONFIG_T)
+    } };
+    MMAL_PARAMETER_VIDEO_PROFILE_T vp = {
+        { MMAL_PARAMETER_PROFILE, sizeof (MMAL_PARAMETER_VIDEO_PROFILE_T) },
+        { MMAL_VIDEO_PROFILE_H264_HIGH, MMAL_VIDEO_LEVEL_H264_4 }
+    };
+
+    set_counts();
+
+    // reload config if requested
+    if (load_conf != 0) {
+        read_config(MJPG_DEF_CFG_FILE, 1);
+        if (cfg_stru[c_user_config]) {
+            read_config(cfg_stru[c_user_config],0);
+        }
+    }
 
     // create camera
     status = mmal_component_create(MMAL_COMPONENT_DEFAULT_CAMERA, &camera);
     MMAL_STATUS("Could not create camera");
+
+    if (cfg_val[c_camera_num] > 0) {
+        cam_num.value = cfg_val[c_camera_num] - 1;
+        status = mmal_port_parameter_set(camera->control, &cam_num.hdr);
+        MMAL_STATUS("Could not select camera");
+        if (!camera->output_num) {
+            status = MMAL_ENOSYS;
+            error("Camera doesn't have output ports", __function__, __LINE__);
+        }
+    }
     status = mmal_port_enable(camera->control, camera_control_callback);
     MMAL_STATUS("Could not enable camera control port");
 
-    MMAL_PARAMETER_CAMERA_CONFIG_T cam_config = {
-        {
-            MMAL_PARAMETER_CAMERA_CONFIG,
-            sizeof (MMAL_PARAMETER_CAMERA_CONFIG_T)
-        },
-        .max_stills_w = image_width,
-        .max_stills_h = image_height,
-        .stills_yuv422 = 0,
-        .one_shot_stills = 1,
-        .max_preview_video_w = video_width,
-        .max_preview_video_h = video_height,
-        .num_preview_video_frames = 3,
-        .stills_capture_circular_buffer_height = 0,
-        .fast_preview_resume = 0,
-        .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC
-    };
-    mmal_port_parameter_set(camera->control, cam_config);
+    cam_config.max_stills_w = cfg_val[c_image_width];
+    cam_config.max_stills_h = cfg_val[c_image_height];
+    cam_config.stills_yuv422 = 0;
+    cam_config.one_shot_stills = 1;
+    cam_config.max_preview_video_w = cfg_val[c_video_width];
+    cam_config.max_preview_video_h = cfg_val[c_video_height];
+    cam_config.num_preview_video_frames = 3;
+    cam_config.stills_capture_circular_buffer_height = 0;
+    cam_config.fast_preview_resume = 0;
+    cam_config.use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC;
+    mmal_port_parameter_set(camera->control, &cam_config);
 
     format = camera->output[PREVIEW_PORT]->format;
-    format->es->video.width = VCOS_ALIGN_UP(video_width, 32);
-    format->es->video.height = VCOS_ALIGN_UP(video_height, 16);
+    format->es->video.width = VCOS_ALIGN_UP(cfg_val[c_video_width], 32);
+    format->es->video.height = VCOS_ALIGN_UP(cfg_val[c_video_height], 16);
     format->es->video.crop.x = 0;
     format->es->video.crop.y = 0;
-    format->es->video.crop.width = video_width;
-    format->es->video.crop.height = video_height;
+    format->es->video.crop.width = cfg_val[c_video_width];
+    format->es->video.crop.height = cfg_val[c_video_height];
     format->es->video.frame_rate.num = 0;
     format->es->video.frame_rate.den = 1;
-    status =
-        mmal_port_format_commit(camera->output[PREVIEW_PORT]);
+    status = mmal_port_format_commit(camera->output[PREVIEW_PORT]);
     MMAL_STATUS("Could not set preview format");
 
     format = camera->output[VIDEO_PORT]->format;
     format->encoding_variant = MMAL_ENCODING_I420;
     format->encoding = MMAL_ENCODING_OPAQUE;
-    format->es->video.width = VCOS_ALIGN_UP(video_width, 32);
-    format->es->video.height = VCOS_ALIGN_UP(video_height, 16);
+    format->es->video.width = VCOS_ALIGN_UP(cfg_val[c_video_width], 32);
+    format->es->video.height = VCOS_ALIGN_UP(cfg_val[c_video_height], 16);
     format->es->video.crop.x = 0;
     format->es->video.crop.y = 0;
-    format->es->video.crop.width = video_width;
-    format->es->video.crop.height = video_height;
-    format->es->video.frame_rate.num = video_fps;
+    format->es->video.crop.width = cfg_val[c_video_width];
+    format->es->video.crop.height = cfg_val[c_video_height];
+    format->es->video.frame_rate.num = cfg_val[c_video_fps];
     format->es->video.frame_rate.den = 1;
     status = mmal_port_format_commit(camera->output[VIDEO_PORT]);
     MMAL_STATUS("Could not set video format");
@@ -743,18 +934,19 @@ void start_all(void) {
 
     format = camera->output[CAPTURE_PORT]->format;
     format->encoding = MMAL_ENCODING_OPAQUE;
-    format->es->video.width = VCOS_ALIGN_UP(image_width, 32);
-    format->es->video.height = VCOS_ALIGN_UP(image_height, 16);
+    format->es->video.width = VCOS_ALIGN_UP(cfg_val[c_image_width], 32);
+    format->es->video.height = VCOS_ALIGN_UP(cfg_val[c_image_height], 16);
     format->es->video.crop.x = 0;
     format->es->video.crop.y = 0;
-    format->es->video.crop.width = image_width;
-    format->es->video.crop.height = image_height;
+    format->es->video.crop.width = cfg_val[c_image_width];
+    format->es->video.crop.height = cfg_val[c_image_height];
     format->es->video.frame_rate.num = 0;
     format->es->video.frame_rate.den = 1;
     status = mmal_port_format_commit(camera->output[CAPTURE_PORT]);
     MMAL_STATUS("Could not set still format");
-    if (camera->output[CAPTURE_PORT]->buffer_num < 3)
+    if (camera->output[CAPTURE_PORT]->buffer_num < 3) {
         camera->output[CAPTURE_PORT]->buffer_num = 3;
+    }
 
     status = mmal_component_enable(camera);
     MMAL_STATUS("Could not enable camera");
@@ -762,8 +954,37 @@ void start_all(void) {
     // create jpeg-encoder
     status = mmal_component_create(MMAL_COMPONENT_DEFAULT_IMAGE_ENCODER,
         &jpegencoder);
-    if (status != MMAL_SUCCESS && status != MMAL_ENOSYS)
-        error("Could not create image encoder", __function__, __LINE__);
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS),
+        "Could not create image encoder");
+
+    motion_width = VCOS_ALIGN_UP(cfg_val[c_video_width], 32);
+    motion_height = VCOS_ALIGN_UP(cfg_val[c_video_height], 16);
+
+    if (cfg_val[c_vector_preview]) {
+        motion_img_width = motion_width;
+        motion_img_height = motion_height;
+        format = jpegencoder->input[0]->format;
+        format->encoding = MMAL_ENCODING_I420;
+        format->es->video.width = motion_img_width;
+        format->es->video.height = motion_img_height;
+        format->es->video.crop.x = 0;
+        format->es->video.crop.y = 0;
+        format->es->video.crop.width = motion_width;
+        format->es->video.crop.height = motion_height;
+        format->es->video.frame_rate.num = cfg_val[c_video_fps];
+        format->es->video.frame_rate.den = 1;
+        format->flags = MMAL_ES_FORMAT_FLAG_FRAMED;
+        status = mmal_port_format_commit(jpegencoder->input[0]);
+        MMAL_STATUS("Could not set preview image input format");
+
+        jpegencoder->input[0]->buffer_num = jpegencoder->input[0]->buffer_num_min;
+        jpegencoder->input[0]->buffer_size = jpegencoder->input[0]->buffer_size_min;
+        pool_jpegencoder_in =
+            mmal_pool_create(jpegencoder->input[0]->buffer_num,
+                jpegencoder->input[0]->buffer_size);
+        TESTERR(pool_jpegencoder_in == NULL,
+            "Could not create image output buffer pool");
+    }
 
     mmal_format_copy(jpegencoder->output[0]->format,
         jpegencoder->input[0]->format);
@@ -781,27 +1002,23 @@ void start_all(void) {
         jpegencoder->output[0]->buffer_num =
             jpegencoder->output[0]->buffer_num_min;
     status = mmal_port_format_commit(jpegencoder->output[0]);
-    MMAL_STATUS("Could not set image format");
+    MMAL_STATUS("Could not set image output format");
     status = mmal_port_parameter_set_uint32(jpegencoder->output[0],
-        MMAL_PARAMETER_JPEG_Q_FACTOR, quality);
+        MMAL_PARAMETER_JPEG_Q_FACTOR, cfg_val[c_quality]);
     MMAL_STATUS("Could not set jpeg quality");
 
     status = mmal_component_enable(jpegencoder);
     MMAL_STATUS("Could not enable image encoder");
-    pool_jpegencoder =
-        mmal_port_pool_create(jpegencoder->output[0],
+    pool_jpegencoder = mmal_port_pool_create(jpegencoder->output[0],
         jpegencoder->output[0]->buffer_num,
         jpegencoder->output[0]->buffer_size);
-    if (!pool_jpegencoder) {
-        error("Could not create image buffer pool", __function__, __LINE__);
-    }
+    TESTERR(!pool_jpegencoder, "Could not create image buffer pool");
 
     // create second jpeg-encoder
     status = mmal_component_create(MMAL_COMPONENT_DEFAULT_IMAGE_ENCODER,
         &jpegencoder2);
-    if (status != MMAL_SUCCESS && status != MMAL_ENOSYS) {
-        error("Could not create image encoder 2", __function__, __LINE__);
-    }
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS),
+        "Could not create image encoder 2");
 
     mmal_format_copy(jpegencoder2->output[0]->format,
         jpegencoder2->input[0]->format);
@@ -825,34 +1042,45 @@ void start_all(void) {
     status = mmal_port_parameter_set_uint32(jpegencoder2->output[0],
         MMAL_PARAMETER_JPEG_Q_FACTOR, 85);
     MMAL_STATUS("Could not set jpeg quality 2");
+    status = mmal_port_parameter_set_boolean(camera->control,
+        MMAL_PARAMETER_CAPTURE_STATS_PASS, cfg_val[c_stat_pass]);
+    MMAL_STATUS("Could not set stat_pass");
 
     status = mmal_component_enable(jpegencoder2);
     MMAL_STATUS("Could not enable image encoder 2");
     pool_jpegencoder2 = mmal_port_pool_create(jpegencoder2->output[0],
         jpegencoder2->output[0]->buffer_num,
         jpegencoder2->output[0]->buffer_size);
-    if (!pool_jpegencoder2) {
-        error("Could not create image buffer pool 2", __function__, __LINE__);
-    }
+    TESTERR(pool_jpegencoder2 == NULL, "Could not create image buffer pool 2");
 
     // create h264-encoder
     status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_ENCODER,
         &h264encoder);
-    if (status != MMAL_SUCCESS && status != MMAL_ENOSYS)
-        error("Could not create video encoder");
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS),
+        "Could not create video encoder");
 
     mmal_format_copy(h264encoder->output[0]->format,
         h264encoder->input[0]->format);
+    status = mmal_port_parameter_set_boolean(h264encoder->output[0],
+        MMAL_PARAMETER_MINIMISE_FRAGMENTATION,
+        cfg_val[c_minimise_frag] ? MMAL_TRUE : MMAL_FALSE);
+    MMAL_STATUS("Could not set fragmentation false");
+
     h264encoder->output[0]->format->encoding = MMAL_ENCODING_H264;
-    h264encoder->output[0]->format->bitrate = 17000000;
-    h264encoder->output[0]->buffer_size =
+    h264encoder->output[0]->format->bitrate = cfg_val[c_video_bitrate];
+    DPRINTF(1, "Recommended video buffer size %d\n",
+        h264encoder->output[0]->buffer_size_recommended);
+    h264_size = cfg_val[c_h264_buffer_size] ? cfg_val[c_h264_buffer_size] : 
         h264encoder->output[0]->buffer_size_recommended;
-    if (h264encoder->output[0]->buffer_size <
-        h264encoder->output[0]->buffer_size_min) {
-        h264encoder->output[0]->buffer_size =
-            h264encoder->output[0]->buffer_size_min;
+    if (h264_size < h264encoder->output[0]->buffer_size_min) {
+        h264_size = h264encoder->output[0]->buffer_size_min;
     }
-    h264encoder->output[0]->buffer_num =
+    h264encoder->output[0]->buffer_size = h264_size;
+    DPRINTF(1, "h264 size set to %d\n", h264_size);
+    DPRINTF(1, "recommended video buffers %d\n",
+        h264encoder->output[0]->buffer_num_recommended);
+    h264encoder->output[0]->buffer_num = cfg_val[c_h264_buffers] ?
+        cfg_val[c_h264_buffers] :
         h264encoder->output[0]->buffer_num_recommended;
     if (h264encoder->output[0]->buffer_num <
         h264encoder->output[0]->buffer_num_min) {
@@ -864,25 +1092,13 @@ void start_all(void) {
     status = mmal_port_format_commit(h264encoder->output[0]);
     MMAL_STATUS("Could not set video format");
 
-    MMAL_PARAMETER_UINT32_T param2 = { {
-        MMAL_PARAMETER_VIDEO_ENCODE_INITIAL_QUANT,
-        sizeof (MMAL_PARAMETER_UINT32_T)
-    }, 25 };
-    status = mmal_port_parameter_set(h264encoder->output[0], &param2);
-    MMAL_PARAMETER_UINT32_T("Could not set video quantisation");
+    status = mmal_port_parameter_set(h264encoder->output[0], &veiq);
+    MMAL_STATUS("Could not set video quantisation 1");
 
-    MMAL_PARAMETER_UINT32_T param3 = { {
-        MMAL_PARAMETER_VIDEO_ENCODE_QP_P, sizeof (MMAL_PARAMETER_UINT32_T)
-    }, 31 };
-    status = mmal_port_parameter_set(h264encoder->output[0], &param3);
-    MMAL_STATUS("Could not set video quantisation");
+    status = mmal_port_parameter_set(h264encoder->output[0], &veqp);
+    MMAL_STATUS("Could not set video quantisation 2");
 
-    MMAL_PARAMETER_VIDEO_PROFILE_T param4;
-    param4.hdr.id = MMAL_PARAMETER_PROFILE;
-    param4.hdr.size = sizeof (param4);
-    param4.profile[0].profile = MMAL_VIDEO_PROFILE_H264_HIGH;
-    param4.profile[0].level = MMAL_VIDEO_LEVEL_H264_4;
-    status = mmal_port_parameter_set(h264encoder->output[0], &param4);
+    status = mmal_port_parameter_set(h264encoder->output[0], &vp);
     MMAL_STATUS("Could not set video port format");
 
     status = mmal_port_parameter_set_boolean(h264encoder->input[0],
@@ -893,22 +1109,33 @@ void start_all(void) {
         MMAL_PARAMETER_VIDEO_ENCODE_INLINE_HEADER, 0);
     MMAL_STATUS("Could not set inline flag");
 
-    //
+    status = mmal_port_parameter_set_boolean(h264encoder->output[0],
+        MMAL_PARAMETER_VIDEO_ENCODE_INLINE_VECTORS, 1);
+    MMAL_STATUS("Could not set motion vector flag");
+
+    status = mmal_component_enable(h264encoder);
+    MMAL_STATUS("Could not enable h264encoder");
+
+    pool_h264encoder = mmal_port_pool_create(h264encoder->output[0],
+        h264encoder->output[0]->buffer_num,
+        h264encoder->output[0]->buffer_size);
+    TESTERR(pool_h264encoder == NULL, "Could not create h264 pool");
+
     // create image-resizer
-    //
-    unsigned int height_temp = width * video_height / video_width;
-    height_temp -= height_temp % 16;
+    height_temp = VCOS_ALIGN_UP(cfg_val[c_width] * cfg_val[c_video_height] /
+        cfg_val[c_video_width], 16);
     status = mmal_component_create("vc.ril.resize", &resizer);
-    if (status != MMAL_SUCCESS && status != MMAL_ENOSYS)
-        error("Could not create image resizer");
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS)),
+        "Could not create image resizer");
 
     format = resizer->output[0]->format;
+    format->es->video.width = cfg_val[c_width];
+    format->es->video.height = height_temp;
+    format->es->video.width = VCOS_ALIGN_UP(cfg_val[c_width], 32);
     format->encoding = MMAL_ENCODING_I420;
-    format->es->video.width = VCOS_ALIGN_UP(width, 32);
-    format->es->video.height = VCOS_ALIGN_UP(height_temp, 16);
     format->es->video.crop.x = 0;
     format->es->video.crop.y = 0;
-    format->es->video.crop.width = width;
+    format->es->video.crop.width = cfg_val[c_width];
     format->es->video.crop.height = height_temp;
     format->es->video.frame_rate.num = 30;
     format->es->video.frame_rate.den = 1;
@@ -918,35 +1145,93 @@ void start_all(void) {
     status = mmal_component_enable(resizer);
     MMAL_STATUS("Could not enable image resizer");
 
-    // connect
-    status = mmal_connection_create(&con_cam_res,
-        camera->output[PREVIEW_PORT], resizer->input[0],
-        MMAL_CONNECTION_FLAG_TUNNELLING |
-        MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
-    MMAL_STATUS("Could not create connection camera -> resizer");
-    status = mmal_connection_enable(con_cam_res);
-    MMAL_STATUS("Could not enable connection camera -> resizer");
+    // create null-sink
+    status = mmal_component_create("vc.null_sink", &null_sink);
+    MMAL_STATUS("Could not create null_sink");
+    status = mmal_component_enable(null_sink);
+    MMAL_STATUS("Could not enable null_sink");
 
-    status = mmal_connection_create(&con_res_jpeg, resizer->output[0],
-        jpegencoder->input[0],
-        MMAL_CONNECTION_FLAG_TUNNELLING |
-        MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
-    MMAL_STATUS("Could not create connection resizer -> encoder");
-    status = mmal_connection_enable(con_res_jpeg);
-    MMAL_STATUS("Could not enable connection resizer -> encoder");
+    // create splitter
+    status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_SPLITTER,
+        &splitter);
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS),
+        "Could not create video spltter");
+    status = mmal_component_enable(splitter);
+    MMAL_STATUS("Could not enable video spltter");
+
+    // connect
+    if (!cfg_val[c_vector_preview]) {
+        if (cfg_val[c_motion_detection]) {
+            status = mmal_connection_create(&con_cam_pre,
+                camera->output[PREVIEW_PORT], splitter->input[0],
+                MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection camera -> splitter");
+            status = mmal_connection_enable(con_cam_pre);
+            MMAL_STATUS("Could not enable connection camera -> splitter");
+
+            status = mmal_connection_create(&con_spli_res, splitter->output[0],
+                resizer->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection splitter -> resizer");
+            status = mmal_connection_enable(con_spli_res);
+            MMAL_STATUS("Could not enable connection splitter -> resizer");
+
+            status = mmal_connection_create(&con_res_jpeg, resizer->output[0],
+                jpegencoder->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection resizer -> encoder");
+            status = mmal_connection_enable(con_res_jpeg);
+            MMAL_STATUS("Could not enable connection resizer -> encoder");
+
+            status = mmal_connection_create(&con_spli_h264, splitter->output[1],
+                h264encoder->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection splitter -> video converter");
+            status = mmal_connection_enable(con_spli_h264);
+            MMAL_STATUS("Could not enable connection splitter -> video converter");
+        } else {
+            status = mmal_connection_create(&con_cam_pre, camera->output[0],
+                resizer->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection camera -> resizer");
+            status = mmal_connection_enable(con_cam_pre);
+            MMAL_STATUS("Could not enable connection camera -> resizer");
+
+            status = mmal_connection_create(&con_res_jpeg, resizer->output[0],
+                jpegencoder->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+                MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+            MMAL_STATUS("Could not create connection resizer -> encoder");
+            status = mmal_connection_enable(con_res_jpeg);
+            MMAL_STATUS("Could not enable connection resizer -> encoder");
+    } else {
+        status = mmal_connection_create(&con_cam_pre, camera->output[0],
+            h264encoder->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
+            MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+        MMAL_STATUS("Could not create connection camera -> video converter");
+        status = mmal_connection_enable(con_cam_pre);
+        MMAL_STATUS("Could not enable connection camera -> video converter");
+
+        status = mmal_port_enable(jpegencoder->input[0],
+            jpegencoder_input_callback);
+        MMAL_STATUS("Could not enable jpeg input port");
+        status = mmal_port_enable(jpegencoder->control,
+            jpegencoder_input_callback);
+        MMAL_STATUS("Could not enable jpeg control port");
+    }
+
+    h264_enable_output();
 
     status = mmal_port_enable(jpegencoder->output[0],
         jpegencoder_buffer_callback);
-    MMAL_STATUS("Could not enable jpeg port");
+    MMAL_STATUS("Could not enable jpeg input port");
     max = mmal_queue_length(pool_jpegencoder->queue);
     for (i = 0; i < max; i++) {
         MMAL_BUFFER_HEADER_T *jpegbuffer =
             mmal_queue_get(pool_jpegencoder->queue);
 
-        if (!jpegbuffer)
-            error("Could not create jpeg buffer header");
-        status =
-            mmal_port_send_buffer(jpegencoder->output[0], jpegbuffer);
+        TESTERR(jpegbuffer == NULL, "Could not create jpeg buffer header");
+        status = mmal_port_send_buffer(jpegencoder->output[0], jpegbuffer);
         MMAL_STATUS("Could not send buffers to jpeg port");
     }
 
@@ -966,46 +1251,88 @@ void start_all(void) {
         MMAL_BUFFER_HEADER_T *jpegbuffer2 =
             mmal_queue_get(pool_jpegencoder2->queue);
 
-        if (!jpegbuffer2) {
-            error("Could not create jpeg buffer header 2");
-        }
+        TESTERR(jpegbuffer2 == NULL, "Could not create jpeg buffer header 2");
         status = mmal_port_send_buffer(jpegencoder2->output[0], jpegbuffer2);
         MMAL_STATUS("Could not send buffers to jpeg port 2");
     }
 
     // settings
-    cam_set_sharpness();
+    cam_set_rational(cset.sharpness, MMAL_PARAMETER_SHARPNESS);
     cam_set_contrast();
     cam_set_brightness();
     cam_set_saturation();
     cam_set_iso();
-    cam_set_vs();
-    cam_set_ec();
-    cam_set_em();
-    cam_set_wb();
-    cam_set_mm();
-    cam_set_ie();
-    cam_set_ce();
+    cam_set_video_stabilisation();
+    cam_set_exposure_compensation();
+    cam_set_raw_layer();
+    cam_set_shutter_speed();
+    cam_set_image_quality();
+    cam_set_video_buffer();
     cam_set_rotation();
-    cam_set_flip();
+    cam_set_exposure_mode();
+    cam_set_white_balance();
+    cam_set_metering_mode();
+    cam_set_image_effect();
+    cam_set_colour_effect_en();
+    cam_set_hflip();
+    cam_set_autowbgain_r();
     cam_set_roi();
-    cam_set_ss();
-    cam_set_quality();
-    cam_set_raw();
     cam_set_bitrate();
     cam_set_annotation();
 
+    setup_motiondetect();
 }
 
-
 void stop_all(void) {
+    // Make sure any current recording is terminated before starting this
+    if (v_capturing) {
+        stop_video(0);
+    }
+    cam_stop_buffering();
+
     // disable components
-    if (resizer) {
+    if (jpegencoder->output[0]->is_enabled) {
+        mmal_port_disable(jpegencoder->output[0]);
+    }
+    if (cfg_val[c_vector_preview] && jpegencoder->input[0]->is_enabled) {
+        mmal_port_disable(jpegencoder->input[0]);
+    }
+    if (jpegencoder2->output[0]->is_enabled) {
+        mmal_port_disable(jpegencoder2->output[0]);
+    }
+    if (h264encoder->output[0]->is_enabled) {
+        mmal_port_disable(h264encoder->output[0]);
+    }
+    if (con_cam_pre != NULL) {
+        mmal_connection_destroy(con_cam_pre);
+        con_cam_pre = NULL;
+    }
+    if (con_spli_res != NULL) {
+        mmal_connection_destroy(con_spli_res);
+        con_spli_res = NULL;
+    }
+    if (con_spli_h264 != NULL) {
+        mmal_connection_destroy(con_spli_h264);
+        con_spli_h264 = NULL;
+    }
+    if (con_res_jpeg != NULL) {
+        mmal_connection_destroy(con_res_jpeg);
+        con_res_jpeg = NULL;
+    }
+    if (con_cam_h264 != NULL) {
+        mmal_connection_destroy(con_cam_h264);
+        con_cam_h264 = NULL;
+    }
+    if (con_cam_jpeg != NULL) {
+        mmal_connection_destroy(con_cam_jpeg);
+        con_cam_jpeg = NULL;
+    }
+    if (resizer != NULL) {
         mmal_component_disable(resizer);
         mmal_component_destroy(resizer);
         resizer = NULL;
     }
-    if (camera) {
+    if (camera != NULL) {
         mmal_component_disable(camera);
         mmal_component_destroy(camera);
         camera = NULL;
@@ -1015,18 +1342,19 @@ void stop_all(void) {
     if (jpegencoder != NULL) {
         check_disable_port(jpegencoder->output[0]);
         mmal_component_disable(jpegencoder);
-        if (pool_jpegencoder) {
+        if (pool_jpegencoder != NULL) {
             mmal_port_pool_destroy(jpegencoder->output[0], pool_jpegencoder);
+            pool_jpegencoder = NULL;
         }
         mmal_component_destroy(jpegencoder);
         jpegencoder = NULL;
     }
-
     if (jpegencoder2 != NULL) {
         check_disable_port(jpegencoder2->output[0]);
         mmal_component_disable(jpegencoder2);
-        if (pool_jpegencoder2) {
+        if (pool_jpegencoder2 != NULL) {
             mmal_port_pool_destroy(jpegencoder2->output[0], pool_jpegencoder2);
+            pool_jpegencoder2 = NULL;
         }
         mmal_component_destroy(jpegencoder2);
         jpegencoder2 = NULL;
@@ -1035,22 +1363,45 @@ void stop_all(void) {
     if (h264encoder != NULL) {
         check_disable_port(h264encoder->output[0]);
         mmal_component_disable(h264encoder);
+        if (pool_h264encoder != NULL) {
+            mmal_port_pool_destroy(h264encoder->output[0], pool_h264encoder);
+            pool_h264encoder = NULL;
+        }
         mmal_component_destroy(h264encoder);
         h264encoder = NULL;
     }
+    if (null_sink != NULL) {
+        mmal_component_disable(null_sink);
+        mmal_component_destroy(null_sink);
+        null_sink = NULL;
+    }
+    if (splitter != NULL) {
+        mmal_component_disable(splitter);
+        mmal_component_destroy(splitter);
+        splitter = NULL;
+    }
+
+    if (pool_jpegencoder_in != NULL) {
+        mmal_port_pool_destroy(jpegencoder->input[0], pool_jpegencoder_in);
+        pool_jpegencoder_in = NULL;
+    }
 
     // destroy connections
-    if (con_cam_res) {
+    if (con_cam_res != NULL) {
         mmal_connection_destroy(con_cam_res);
+        con_cam_res = NULL;
     }
-    if (con_res_jpeg) {
+    if (con_res_jpeg != NULL) {
         mmal_connection_destroy(con_res_jpeg);
+        con_res_jpeg = NULL;
     }
-    if (con_cam_jpeg) {
+    if (con_cam_jpeg != NULL) {
         mmal_connection_destroy(con_cam_jpeg);
+        con_cam_jpeg = NULL;
     }
-    if (con_cam_h264) {
+    if (con_cam_h264 != NULL) {
         mmal_connection_destroy(con_cam_h264);
+        con_cam_h264 = NULL
     }
 
     // cleanup semaphores
@@ -1063,10 +1414,10 @@ void capt_img(void) {
     long limit = atoi(space_limit);
 
     currTime = time(NULL);
-    localTime = localtime(&currTime);
-    asprintf(&filename_temp, jpeg2_filename, localTime->tm_year + 1900,
-        localTime->tm_mon + 1, localTime->tm_mday, localTime->tm_hour,
-        localTime->tm_min, localTime->tm_sec, image2_cnt);
+    gmTime = gmtime(&currTime);
+    asprintf(&filename_temp, jpeg2_filename, gmTime->tm_year + 1900,
+        gmTime->tm_mon + 1, gmTime->tm_mday, gmTime->tm_hour,
+        gmTime->tm_min, gmTime->tm_sec, image2_cnt);
     if (!statvfs(jpeg2_root, &buf)) {
         TESTERR((limit > 0) && ((buf.f_bsize * buf.f_bavail) < limit),
             "Insufficient disk space");
@@ -1095,15 +1446,69 @@ void capt_img(void) {
     // even though it appears to be all correct, so reverting to untimed one until figure out why its erratic
     vcos_semaphore_wait(&callback_data.complete_semaphore);
     puts("Capture complete");
-
 }
 
+int findNextCount(char* folder, char* source) {
+    char* search;
+    char *s, *e;
+    unsigned int current_count, max_count = 0;
+    int found = 0;
+    DIR *dp;
+    struct dirent *fp;
+
+    // get working copy of a path
+    asprintf(&search,"%s", folder);
+    // find base path by searching forward for first %sub then back for /
+    s = strchr(search, '%');
+    if (s != NULL) {
+        *s = 0;
+        s = strrchr(search, '/');
+        if (s != NULL) {
+            //truncate off to get base path and open it
+            *s = 0;
+            dp = opendir(search);
+            if (dp != NULL) {
+                //scan the contents
+                while ((fp = readdir(dp))) {
+                    s = fp->d_name;
+                    // check if name is a thumbnail
+                    e = s + strlen(s) - 7;
+                    if (e > s && strcmp(e, ".th.jpg") == 0) {
+                        // truncate where number should end
+                        *e = 0;
+                        //search to find beginning of field
+                        s = strrchr(s, '.');
+                        if (s != NULL) {
+                            //set start to beginning
+                            s++;
+                            //see if it a comparison type
+                            if (strchr(source, *s) != NULL) {
+                                //extract number and set maximum
+                                found = 1;
+                                current_count = strtoul(s+1, &e, 10);
+                                if (current_count > max_count) { 
+                                    max_count = current_count;
+                                }  
+                            }  
+                        }  
+                    }  
+                }  
+                closedir(dp);
+            }  
+        }  
+    }  
+    free(search);
+    return max_count + found;
+}  
+
 int main(int argc, char *argv[]) {
-    int i, max, fd, length;
-    char readbuf[60];
-    char *filename_temp, *filename_recording, *cmd_temp;
+    int i, max, /* fd, */ length;
+    /* char readbuf[60]; */
+    char *filename_temp, /* *filename_recording, */ *cmd_temp;
     struct timeval now, delta, interval;
+    char *bpath;
     FILE *fp;
+    struct sigaction action;
     struct timeval prev = { 0 };
     char *line = NULL;
 
@@ -1121,143 +1526,38 @@ int main(int argc, char *argv[]) {
             i++;
             video_cnt = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-md")) {
-            motion_detection = 1;
+            cfg_val[c_motion_detection] = 1;
         } else {
-            error("Invalid arguments", __function__, __LINE__);
+            fprintf(stderr, "Invalid argument: %s\n", argv[i]);
+            return EX_USAGE;
         }
     }
 
-    // read config file
-    fp = fopen(MJPG_DEF_CFG_FILE, "r");
-    if (fp != NULL) {
-        // XXX dike this out and use fgets like a normal human being
-        unsigned int len = 0;
-        while ((length = getline(&line, &len, fp)) != -1) {
-            line[length - 1] = 0;
-            if (!strncmp(line, "width ", 6)) {
-                width = atoi(line + 6);
-            } else if (!strncmp(line, "quality ", 8)) {
-                quality = atoi(line + 8);
-            } else if (!strncmp(line, "divider ", 8)) {
-                divider = atoi(line + 8);
-            } else if (!strncmp(line, "preview_path ", 13)) {
-                asprintf(&jpeg_filename, "%s", line + 13);
-            } else if (!strncmp(line, "spacelimit", 11)) {
-                asprintf(&space_limit, "%s", line + 11);
-            } else if (!strncmp(line, "image_path ", 11)) {
-                asprintf(&jpeg2_filename, "%s", line + 11);
-            } else if (!strncmp(line, "image_path_root", 16)) {
-                asprintf(&jpeg2_root, "%s", line + 16);
-            } else if (!strncmp(line, "video_path ", 11)) {
-                asprintf(&h264_filename, "%s", line + 11);
-            } else if (!strncmp(line, "status_file ", 12)) {
-                asprintf(&status_filename, "%s", line + 12);
-            } else if (!strncmp(line, "control_file ", 13)) {
-                asprintf(&pipe_filename, "%s", line + 13);
-            } else if (!strncmp(line, "annotation ", 11)) {
-                asprintf(&cset.annotation, "%s", line + 11);
-            } else if (!strncmp(line, "anno_background true", 20)) {
-                cset.annback = 1;
-            } else if (!strncmp(line, "MP4Box true", 11)) {
-                mp4box = 1;
-            } else if (!strncmp(line, "autostart idle", 14)) {
-                autostart = 0;
-                idle = 1;
-            } else if (!strncmp(line, "motion_detection true", 21)) {
-                motion_detection = 1;
-            } else if (!strncmp(line, "sharpness ", 10)) {
-                cset.sharpness = atoi(line + 10);
-            } else if (!strncmp(line, "contrast ", 9)) {
-                cset.contrast = atoi(line + 9);
-            } else if (!strncmp(line, "brightness ", 11)) {
-                cset.brightness = atoi(line + 11);
-            } else if (!strncmp(line, "saturation ", 11)) {
-                cset.saturation = atoi(line + 11);
-            } else if (!strncmp(line, "iso ", 4)) {
-                cset.iso = atoi(line + 4);
-            } else if (!strncmp(line, "video_stabilisation true", 24)) {
-                cset.vs = 1;
-            } else if (!strncmp(line, "exposure_compensation ", 22)) {
-                cset.ec = atoi(line + 22);
-            } else if (!strncmp(line, "exposure_mode ", 14)) {
-                sprintf(cset.em, "%s", line + 14);
-            } else if (!strncmp(line, "white_balance ", 14)) {
-                sprintf(cset.wb, "%s", line + 14);
-            } else if (!strncmp(line, "metering_mode ", 14)) {
-                sprintf(cset.mm, "%s", line + 14);
-            } else if (!strncmp(line, "image_effect ", 13)) {
-                sprintf(cset.ie, "%s", line + 13);
-            } else if (!strncmp(line, "colour_effect_en ", 17)) {
-                if (!strncmp(line + 17, "true", 4))
-                    cset.ce_en = 1;
-            } else if (!strncmp(line, "colour_effect_u ", 16)) {
-                cset.ce_u = atoi(line + 16);
-            } else if (!strncmp(line, "colour_effect_v ", 16)) {
-                cset.ce_v = atoi(line + 16);
-            } else if (!strncmp(line, "rotation ", 9)) {
-                cset.rotation = atoi(line + 9);
-            } else if (!strncmp(line, "hflip ", 6)) {
-                if (!strncmp(line + 6, "true", 4))
-                    cset.hflip = 1;
-            } else if (!strncmp(line, "vflip ", 6)) {
-                if (!strncmp(line + 6, "true", 4))
-                    cset.vflip = 1;
-            } else if (!strncmp(line, "sensor_region_x ", 16)) {
-                cset.roi_x = strtoull(line + 16, NULL, 0);
-            } else if (!strncmp(line, "sensor_region_y ", 16)) {
-                cset.roi_y = strtoull(line + 16, NULL, 0);
-            } else if (!strncmp(line, "sensor_region_w ", 16)) {
-                cset.roi_w = strtoull(line + 16, NULL, 0);
-            } else if (!strncmp(line, "sensor_region_h ", 16)) {
-                cset.roi_h = strtoull(line + 16, NULL, 0);
-            } else if (!strncmp(line, "shutter_speed ", 14)) {
-                cset.ss = strtoull(line + 14, NULL, 0);
-            } else if (!strncmp(line, "image_quality ", 14)) {
-                cset.quality = atoi(line + 14);
-            } else if (!strncmp(line, "raw_layer ", 10)) {
-                if (!strncmp(line + 10, "true", 4))
-                    cset.raw = 1;
-            } else if (!strncmp(line, "video_bitrate ", 14)) {
-                cset.bitrate = strtoull(line + 14, NULL, 0);
-            } else if (!strncmp(line, "video_width ", 12)) {
-                video_width = atoi(line + 12);
-            } else if (!strncmp(line, "video_height ", 13)) {
-                video_height = atoi(line + 13);
-            } else if (!strncmp(line, "video_fps ", 10)) {
-                video_fps = atoi(line + 10);
-            } else if (!strncmp(line, "MP4Box_fps ", 11)) {
-                MP4Box_fps = atoi(line + 11);
-            } else if (!strncmp(line, "image_width ", 12)) {
-                image_width = atoi(line + 12);
-            } else if (!strncmp(line, "image_height ", 13)) {
-                image_height = atoi(line + 13);
-            } else if (!strncmp(line, "#", 1)) {
-            } else if (!strcmp(line, "")) {
-                // skip
-            } else {
-                printf("Unknown command in config file: %s\n", line);
-                error("Invalid config file", __function__, __LINE__);
-            }
+    // default base media path
+    asprintf(&cfg_stru[c_media_path], "%s", "/var/www/media");
 
-        }
-        if (line != NULL) {
-            free(line);
-            line = NULL;
-        }
+    // read configs and init
+    read_config(MJPG_DEF_CFG_FILE, 1);
+    if (cfg_stru[c_user_config] != 0)
+        read_config(cfg_stru[c_user_config], 0);
+
+    createPath(cfg_stru[c_log_file], cfg_stru[c_base_path]);
+    if (cfg_stru[c_boxing_path] != NULL) {
+        asprintf(&bpath, "%s/temp", cfg_stru[c_boxing_path]);
+        createPath(bpath, cfg_stru[c_base_path]);
+        free(bpath);
     }
 
+    puts("RaspiMJPEG Version " VERSION);
+    exec_macro(cfg_stru[c_startstop], "start");
+
+    if (cfg_val[c_motion_detection]) {
+        TESTERR(system("motion") < 0, "Could not start Motion");
+    }
+    //
     // init
-    if (autostart) {
-        start_all();
-    }
-    if (motion_detection) {
-        if (system("motion") < 0) {
-            error("Could not start Motion", __function__, __MAIN__);
-        }
-    }
-
-    // run
-    if (autostart) {
+    if (cfg_val[c_autostart]) {
+        start_all(0);
         if (pipe_filename != NULL) {
             puts("MJPEG streaming, ready to receive commands");
         } else {
@@ -1271,7 +1571,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    struct sigaction action;
     memset(&action, 0, sizeof (struct sigaction));
     action.sa_handler = term;
     sigaction(SIGTERM, &action, NULL);
@@ -1279,11 +1578,9 @@ int main(int argc, char *argv[]) {
 
     if (status_filename != 0) {
         status_file = fopen(status_filename, "w");
-        if (status_file == NULL) {
-            error("Could not open/create status-file", __function__, __LINE__);
-        }
-        if (autostart) {
-            if (!motion_detection) {
+        TESTERR(status_file == NULL, "Could not open/create status-file");
+        if (cfg_val[c_autostart]) {
+            if (!cfg_val[c_motion_detection]) {
                 fputs("ready", status_file);
             } else {
                 fputs("md_ready", status_file);
@@ -1294,13 +1591,76 @@ int main(int argc, char *argv[]) {
         fclose(status_file);
     }
 
-    while (running) {
-        if (pipe_filename != 0) {
+    // Set up FIFO names
+    if (cfg_stru[c_control_file] == 0) {
+        error("No PIPE defined", 1);
+    }
+    for (i = 0; i < FIFO_MAX; i++) {
+        if (i == 0) {
+            sprintf(fdName[i], "%s", cfg_stru[c_control_file]);
+        } else {
+            sprintf(fdName[i], "%s%d", cfg_stru[c_control_file], i+10);
+        }
+    }
 
-            fd = open(pipe_filename, O_RDONLY | O_NONBLOCK);
-            if (fd < 0) {
-                error("Could not open PIPE", __function__, __LINE__);
+    // Clear out anything in FIFO(s) first
+    for (i = 0; i < FIFO_MAX; i++) {
+        do {
+            fd[i] = open(fdName[i], O_RDONLY | O_NONBLOCK);
+            if (fd[i] >= 0) {
+                fcntl(fd[i], F_SETFL, 0);
+                length = read(fd[i], readbuf[0], 60);
+                close(fd[i]);
+            } else {
+                TESTERR(!i, "Could not open main PIPE");
+                // apparently the others aren't as important
             }
+        } while ((fd[i] >= 0) && length);
+    }
+
+    for (i = 0; i < FIFO_MAX; i++) {
+        fd[i] = open(fdName[i], O_RDONLY | O_NONBLOCK);
+        if (fd[i] >= 0) {
+            DPRINTF(1, "Opening FIFO %i %s %i\n", i, fdName[i], fd[i]);
+            fcntl(fd[i], F_SETFL, 0); 
+        } 
+    }
+
+    if (cfg_val[c_autostart]) {
+        DPRINTF(1, "MJPEG streaming, ready to receive commands\n");
+        // Kick off motion detection at start if required.
+        if (cfg_val[c_motion_detection] && (cfg_val[c_motion_external] == 1)) {
+            DPUTS(1, "Autostart external motion kill any runnng motion");
+            if (system("pkill motion 2> /dev/null") < 0) {
+                DPERROR(1, "Could not stop external motion");
+                exit(EX_OSERR);
+            }
+            sleep(1);
+            DPUTS(1, "Autostart external motion start external motion");
+            if (system("motion") < 0) {
+                DPERROR(1, "Could not start external motion");
+                exit(EX_OSERR);
+            }
+        }
+    } else {
+        if (cfg_stru[c_control_file] != 0) {
+            DPUTS(1, "MJPEG idle, ready to receive commands");
+        }
+        else DPUTS(1, "MJPEG idle");
+    }
+
+    // Send restart signal to scheduler
+    send_schedulecmd("9");
+
+    while (running) {
+        for (i = 0; i < FIFO_MAX; i++) {
+            checkPipe(i);
+        }
+
+        /* Start of old all-in-one processing */
+        if (pipe_filename != 0) {
+            fd = open(pipe_filename, O_RDONLY | O_NONBLOCK);
+            TESTERR(fd < 0, "Could not open PIPE");
             fcntl(fd, F_SETFL, 0);
             length = read(fd, readbuf, 60);
             close(fd);
@@ -1315,9 +1675,8 @@ int main(int argc, char *argv[]) {
                                 mmal_port_pool_create(h264encoder->output[0],
                                 h264encoder->output[0]->buffer_num,
                                 h264encoder->output[0]->buffer_size);
-                            if (!pool_h264encoder) {
-                                error("Could not create pool");
-                            }
+                            TESTERR(pool_h264encoder == NULL,
+                                "Could not create pool");
                             status = mmal_connection_create(&con_cam_h264,
                                 camera->output[VIDEO_PORT],
                                 h264encoder->input[0],
@@ -1327,22 +1686,22 @@ int main(int argc, char *argv[]) {
                             status = mmal_connection_enable(con_cam_h264);
                             MMAL_STATUS("Could not enable connection camera -> video converter");
                             currTime = time(NULL);
-                            localTime = localtime(&currTime);
+                            gmTime = gmtime(&currTime);
                             if (mp4box) {
                                 asprintf(&filename_recording, h264_filename,
-                                    localTime->tm_year + 1900,
-                                    localTime->tm_mon + 1,
-                                    localTime->tm_mday, localTime->tm_hour,
-                                    localTime->tm_min, localTime->tm_sec,
+                                    gmTime->tm_year + 1900,
+                                    gmTime->tm_mon + 1,
+                                    gmTime->tm_mday, gmTime->tm_hour,
+                                    gmTime->tm_min, gmTime->tm_sec,
                                     video_cnt);
                                 asprintf(&filename_temp, "%s.h264",
                                     filename_recording);
                             } else {
                                 asprintf(&filename_temp, h264_filename,
-                                    video_cnt, localTime->tm_year + 1900,
-                                    localTime->tm_mon + 1,
-                                    localTime->tm_mday, localTime->tm_hour,
-                                    localTime->tm_min, localTime->tm_sec);
+                                    video_cnt, gmTime->tm_year + 1900,
+                                    gmTime->tm_mon + 1,
+                                    gmTime->tm_mday, gmTime->tm_hour,
+                                    gmTime->tm_min, gmTime->tm_sec);
                             }
                             h264output_file = fopen(filename_temp, "wb");
                             free(filename_temp);
@@ -1407,9 +1766,8 @@ int main(int argc, char *argv[]) {
                                 "MP4Box -fps %i -add %s.h264 %s > /dev/null",
                                 MP4Box_fps, filename_recording,
                                 filename_recording);
-                            if (system(cmd_temp) < 0) {
-                                error("Could not start MP4Box", __function__, __LINE__);
-                            }
+                            TESTERR(system(cmd_temp) < 0,
+                                "Could not start MP4Box");
                             asprintf(&filename_temp, "%s.h264",
                                 filename_recording);
                             remove(filename_temp);
@@ -1651,8 +2009,8 @@ int main(int argc, char *argv[]) {
                 } else if ((readbuf[0] == 'm') && (readbuf[1] == 'd')) {
                     if (readbuf[3] == '0') {
                         motion_detection = 0;
-                        if (system("pkill motion") < 0) {
-                            error("Could not stop Motion", __function__, __LINE__);
+                        TESTERR(system("pkill motion") < 0,
+                            "Could not stop Motion");
                         }
                         puts("Motion detection stopped");
                         if (status_filename != 0) {
@@ -1662,10 +2020,9 @@ int main(int argc, char *argv[]) {
                         }
                     } else {
                         motion_detection = 1;
-                        if (system("motion") < 0) {
-                            error("Could not start Motion", __function__, __LINE__);
-                        }
-                        printf("Motion detection started\n");
+                        TESTERR(system("motion") < 0,
+                            "Could not start Motion");
+                        puts("Motion detection started");
                         if (status_filename != 0) {
                             status_file = fopen(status_filename, "w");
                             fputs("md_ready", status_file);
@@ -1674,8 +2031,9 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
-
         }
+        /* End of old all-in-one processing */
+
         if (timelapse) {
             gettimeofday(&now, NULL);
             timersub(&now, &prev, &delta);
@@ -1686,7 +2044,71 @@ int main(int argc, char *argv[]) {
                 gettimeofday(&prev, NULL);
             }
         }
+
+        /* Start of new broken-out processing */
+        // check to see if image preview changing
+        if (!idle && cfg_val[c_watchdog_interval] > 0) {
+            if (watchdog++ > cfg_val[c_watchdog_interval]) {
+                watchdog = 0;
+                pv_time = get_mtime(cfg_stru[c_preview_path]);
+                if (pv_time == 0) {
+                    watchdog_errors++;
+                } else {
+                    if (pv_time > last_pv_time) {
+                        watchdog_errors = 0;
+                    } else {
+                        watchdog_errors++;
+                    }
+                    last_pv_time = pv_time;
+                }
+                if (watchdog_errors >= cfg_val[c_watchdog_errors]) {
+                    DPUTS(1, "Watchdog detected problem. Stopping");
+                    running = 0;
+                }
+            }
+        } else {
+            watchdog_errors = 0;
+        }
+        if (++onesec_check >= 10) {
+            // run check on background boxing every 10 ticks and check for video
+            // timer if capturing
+            onesec_check = 0;
+            // 4.9 compiler seems to want a print after the box finish to get
+            // input FIFO working again
+            if (check_box_files()) {
+                DPUTS(1, "Removed item from Box Queue");
+            }
+            // Check to make sure image operation not stuck (no callback) if
+            // enabled
+            if ((cfg_val[c_callback_timeout] > 0) && i_capturing) {
+                i_capturing--;
+                if (i_capturing == 0) {
+                    DPRINTF(1, "Image capture timed out %s\n", filename_image);
+                    close_img(0);
+                }
+            }
+            if (v_capturing && (video_stoptime > 0)) {
+                if (time(NULL) >= video_stoptime) {
+                    printLog("Stopping video from timer\n");
+                    stop_video(0);
+                    if (cfg_val[c_video_split] > 0) {
+                        video_stoptime = time(NULL) + cfg_val[c_video_split];
+                        DPRINTF(1, "Restarting next split of %d seconds\n",
+                            cfg_val[c_video_split]);
+                        start_video(0);
+                    }
+                }
+            }
+        }
+        /* End of new broken-out processing */
+
         usleep(100000);
+    }
+
+    close(fd);
+    if (system("pkill motion 2> /dev/null") < 0) {
+        DPERROR(1, "Could not stop external motion");
+        exit(EX_OSERR);
     }
 
     puts("SIGINT/SIGTERM received, stopping");
@@ -1696,5 +2118,6 @@ int main(int argc, char *argv[]) {
         stop_all();
     }
 
+    exec_macro(cfg_stru[c_startstop], "stop");
     return 0;
 }
