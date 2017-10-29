@@ -144,6 +144,11 @@ enum {
    MMAL_PARAMETER_BLACK_LEVEL,               /**< Takes a @ref MMAL_PARAMETER_UINT32_T */
    MMAL_PARAMETER_RESIZE_PARAMS,             /**< Takes a @ref MMAL_PARAMETER_RESIZE_T */
    MMAL_PARAMETER_CROP,                      /**< Takes a @ref MMAL_PARAMETER_CROP_T */
+   MMAL_PARAMETER_OUTPUT_SHIFT,              /**< Takes a @ref MMAL_PARAMETER_INT32_T */
+   MMAL_PARAMETER_CCM_SHIFT,                 /**< Takes a @ref MMAL_PARAMETER_INT32_T */
+   MMAL_PARAMETER_CUSTOM_CCM,                /**< Takes a @ref MMAL_PARAMETER_CUSTOM_CCM_T */
+   MMAL_PARAMETER_ANALOG_GAIN,               /**< Takes a @ref MMAL_PARAMETER_RATIONAL_T */
+   MMAL_PARAMETER_DIGITAL_GAIN,              /**< Takes a @ref MMAL_PARAMETER_RATIONAL_T */
 };
 
 /** Thumbnail configuration parameter type */
@@ -946,4 +951,17 @@ typedef struct MMAL_PARAMETER_CROP_T {
 
    MMAL_RECT_T rect;
 } MMAL_PARAMETER_CROP_T;
+
+typedef struct MMAL_PARAMETER_CCM_T {
+   MMAL_RATIONAL_T ccm[3][3];
+   int32_t offsets[3];
+} MMAL_PARAMETER_CCM_T;
+
+typedef struct MMAL_PARAMETER_CUSTOM_CCM_T {
+   MMAL_PARAMETER_HEADER_T hdr;
+
+   MMAL_BOOL_T enable;           /**< Enable the custom CCM. */
+   MMAL_PARAMETER_CCM_T ccm;     /**< CCM to be used. */
+} MMAL_PARAMETER_CUSTOM_CCM_T;
+
 #endif  /* MMAL_PARAMETERS_CAMERA_H */
