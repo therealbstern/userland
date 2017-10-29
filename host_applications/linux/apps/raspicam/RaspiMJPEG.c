@@ -54,7 +54,9 @@ Camera Port      OUT -->  IN       OUT --> IN             ATTACHED
 2 / stills                    --> JPEG encoder 2 <-- callback 2 to save JPEG */
 
 // We use some GNU extensions (asprintf)
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,10 +86,29 @@ Camera Port      OUT -->  IN       OUT --> IN             ATTACHED
 
 #include "RaspiMJPEG.h"
 
+#ifndef DPRINTF
+#define DPRINTF(p, s, x...) { if (p) { \
+    fprintf(stderr, __FILE__ ": %s: %d: " s, __FUNCTION__, __LINE__, x); \
+    fflush(stderr); \
+}}
+#endif
+#ifndef DPUTS
+#define DPUTS(p, s) { if (p) { \
+    fprintf(stderr, __FILE__ ": %s: %d: " s "\n", __FUNCTION__, __LINE__); \
+    fflush(stderr); \
+}}
+#endif
+#ifndef DPERROR
+#define DPERROR(p, s) { if (p) { \
+    fprintf(stderr, __FILE__ ": %s: %d: " s ": %s\n", __FUNCTION__, \
+        __LINE__, strerror(errno)); \
+    fflush(stderr); \
+}}
+#endif
+
 MMAL_STATUS_T status;
-/* time_t currTime; */
+time_t currTime;
 struct tm *gmTime;
-struct timespec currTime;
 char readbuf[FIFO_MAX][2 * MAX_COMMAND_LEN], header_bytes[29];
 
 int cb_len, cb_wptr, cb_wrap, iframe_buff[IFRAME_BUFSIZE], iframe_buff_wpos,
@@ -100,13 +121,14 @@ char *box_files[MAX_BOX_FILES], *cfg_strd[KEY_COUNT + 1],
     *cfg_stru[KEY_COUNT + 1];
 unsigned char *vector_buffer, *mask_buffer_mem, *mask_buffer;
 long int cfg_val[KEY_COUNT + 1];
+volatile unsigned int watchdog = 0, watchdog_errors = 0;
 
 MMAL_COMPONENT_T *camera = NULL, *jpegencoder = NULL, *jpegencoder2 = NULL,
     *h264encoder = NULL, *resizer = NULL, *null_sink = NULL,
     *splitter = NULL;
-MMAL_CONNECTION_T *con_cam_pre = NULL, *con_spli_res = NULL, *con_spli_h264 = NULL,
-    *con_cam_res = NULL, *con_res_jpeg = NULL, *con_cam_h264 = NULL,
-    *con_cam_jpeg = NULL;
+MMAL_CONNECTION_T *con_cam_pre = NULL, *con_spli_res = NULL,
+    *con_spli_h264 = NULL, *con_cam_res = NULL, *con_res_jpeg = NULL,
+    *con_cam_h264 = NULL, *con_cam_jpeg = NULL;
 MMAL_POOL_T *pool_jpegencoder = NULL, *pool_jpegencoder_in = NULL,
     *pool_jpegencoder2 = NULL, *pool_h264encoder = NULL;
 FILE *jpegoutput_file = NULL, *jpegoutput2_file = NULL,
@@ -115,7 +137,7 @@ int box_head = 0, box_tail = 0;
 char *cb_buff = NULL, *filename_recording = NULL, *filename_image = NULL,
     *jpeg_filename = NULL, *jpeg2_filename = NULL, *h264_filename = NULL,
     *pipe_filename = NULL, *status_filename = NULL, *space_limit = NULL;
-char jpeg2_root = 0;
+char *jpeg2_root = NULL;
 unsigned char timelapse = 0, mp4box = 0, autostart = 1, quality = 85,
     idle = 0, capturing = 0, motion_detection = 0, a_error = 0, v_capturing = 0,
     i_capturing = 0, v_boxing = 0, buffering = 0, buffering_toggle = 0;
@@ -178,6 +200,8 @@ void term(int signum) {
     running = 0;
 }
 
+int findNextCount(char *, char *);
+
 void set_counts() {
     image2_cnt = findNextCount(cfg_stru[c_image_path], "it");
     video_cnt = findNextCount(cfg_stru[c_video_path], "v");
@@ -194,6 +218,8 @@ int getKey(char *key) {
     return KEY_COUNT;
 }
 
+void updateStatus(void);
+
 void addValue(int keyI, char *value, int both) {
     int val;
 
@@ -206,7 +232,7 @@ void addValue(int keyI, char *value, int both) {
     }
 
     if (value == NULL || !value[0]) {
-        cfg_val[keyI] = NULL;
+        cfg_val[keyI] = 0L;
     } else {
         val = strtol(value, NULL, 10);
         asprintf(&cfg_stru[keyI], "%s", value);
@@ -238,7 +264,7 @@ void addValue(int keyI, char *value, int both) {
     }
 }
 
-void addUserValue(int key, char *value){
+void addUserValue(int key, char *value) {
     DPRINTF(1, "Change: %s = %s\n", cfg_key[key], value);
     addValue(key, value, 0);
 }
@@ -252,7 +278,7 @@ void saveUserConfig(char *cfilename) {
         for (i = 0; i < KEY_COUNT; i++) {
             if (cfg_key[i][0]) {
                 if ((cfg_stru[i] == NULL) && (cfg_strd[i] == NULL)) {
-                    next;
+                    continue;
                 }
                 if (cfg_stru[i] == NULL) {
                     fprintf(fp, "%s\n", cfg_key[i]);
@@ -265,6 +291,8 @@ void saveUserConfig(char *cfilename) {
         fclose(fp);
     }
 }
+
+char *trim(char *);
 
 void read_config(char *cfilename, int type) {
     FILE *fp;
@@ -307,6 +335,8 @@ void read_config(char *cfilename, int type) {
         }
     }    
 }
+
+void process_cmd(char *, int);
 
 void checkPipe(int pipe) {
     char *lf;
@@ -404,7 +434,7 @@ static void jpegencoder_buffer_callback(MMAL_PORT_T *port,
         TESTERR((new_buffer == NULL) || (status != MMAL_SUCCESS),
             "Could not send buffers to port");
     } else {
-        DPRINTF(1, "%s: %d: ERROR: port disabled, could not get/send buffer\n");
+        DPUTS(1, "ERROR: port disabled, could not get/send buffer");
     }
 }
 
@@ -423,7 +453,7 @@ static void jpegencoder2_buffer_callback(MMAL_PORT_T *port,
                 bytes_written = fwrite(buffer->data, 1, buffer->length,
                     jpegoutput2_file);
             } else {
-                bytes_written = 0
+                bytes_written = 0;
             }
             mmal_buffer_header_mem_unlock(buffer);
         }
@@ -446,8 +476,7 @@ static void jpegencoder2_buffer_callback(MMAL_PORT_T *port,
             capturing = 0;
         }
     } else {
-        fprintf(stderr, "%s: %d: Received buffer with no userdata\n",
-            __function__, __line__);
+        DPUTS(1, "Received buffer with no userdata");
     }
 
     // Do not forget to check image end to cleanup state.
@@ -467,7 +496,7 @@ static void jpegencoder2_buffer_callback(MMAL_PORT_T *port,
         TESTERR((new_buffer == NULL) || (status != MMAL_SUCCESS),
             "Could not send buffers to port");
     } else {
-        DPRINTF(1, "%s: %d: ERROR: port disabled, could not get/send buffer\n");
+        DPUTS(1, "ERROR: port disabled, could not get/send buffer");
     }
     if (complete) {
         vcos_semaphore_post(&(pData->complete_semaphore));
@@ -476,15 +505,9 @@ static void jpegencoder2_buffer_callback(MMAL_PORT_T *port,
 
 static void h264encoder_buffer_callback(MMAL_PORT_T *port,
     MMAL_BUFFER_HEADER_T *buffer) {
-    int i, p, row, col;
     MMAL_BUFFER_HEADER_T *new_buffer;
     int bytes_written = buffer->length;
-    int space_in_buff = cb_len - cb_wptr;
-    int copy_to_end = space_in_buff > buffer->length ? buffer->length : space_in_buff;
-    int copy_to_start = buffer->length - copy_to_end;
     MMAL_STATUS_T status = MMAL_SUCCESS;
-    static int frame_start = -1, no_iframe_bytes = 0, iframe_requested = 0,
-        no_buffer = 0;
 
     if (buffer->length) {
         mmal_buffer_header_mem_lock(buffer);
@@ -593,7 +616,8 @@ inline void cam_set_em() {
         DPRINTF(1, "Invalid exposure mode: %s\n", cset.em);
         exit(EX_CONFIG);
     }
-    status = mmal_port_parameter_set(camera->control, &exp);
+    status = mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&exp);
     MMAL_STATUS("Could not set exposure mode");
 }
 
@@ -626,7 +650,7 @@ inline void cam_set_wb() {
         DPRINTF(1, "Invalid white balance: %s\n", cset.wb);
         exit(EX_CONFIG);
     }
-    status = mmal_port_parameter_set(camera->control, &param.hdr);
+    status = mmal_port_parameter_set(camera->control, &awb.hdr);
     MMAL_STATUS("Could not set white balance");
 }
 
@@ -648,7 +672,8 @@ inline void cam_set_mm() {
         DPRINTF(1, "Invalid metering mode: %s\n", cset.mm);
         exit(EX_CONFIG);
     }
-    status = mmal_port_parameter_set(camera->control, &m_mode);
+    status = mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&m_mode);
     MMAL_STATUS("Could not set metering mode");
 }
 
@@ -701,7 +726,8 @@ inline void cam_set_ie() {
         DPRINTF(1, "Invalid image effect: %s\n", cset.ie);
         exit(EX_CONFIG);
     }
-    status = mmal_port_parameter_set(camera->control, &imageFX);
+    status = mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&imageFX);
     MMAL_STATUS("Could not set image effect");
 }
 
@@ -725,12 +751,12 @@ void cam_set_rotation() {
     MMAL_STATUS("Could not set rotation (" S(PREVIEW_PORT) ")");
     status = mmal_port_parameter_set_int32(
         camera->output[VIDEO_PORT], MMAL_PARAMETER_ROTATION,
-        cam_setting_rotation);
+        cset.rotation);
     MMAL_STATUS("Could not set rotation (" S(VIDEO_PORT) ")");
     status =
         mmal_port_parameter_set_int32(camera->
         output[CAPTURE_PORT], MMAL_PARAMETER_ROTATION,
-        cam_setting_rotation);
+        cset.rotation);
     MMAL_STATUS("Could not set rotation (" S(CAPTURE_PORT) ")");
 }
 
@@ -745,9 +771,11 @@ void cam_set_flip() {
     } else if (cset.vflip) {
         mirror.value = MMAL_PARAM_MIRROR_VERTICAL;
     }
-    status = mmal_port_parameter_set(camera->output[PREVIEW_PORT], &mirror);
+    status = mmal_port_parameter_set(camera->output[PREVIEW_PORT],
+        (MMAL_PARAMETER_HEADER_T *)&mirror);
     MMAL_STATUS("Could not set flip (" SS(PREVIEW_PORT) ")");
-    status = mmal_port_parameter_set(camera->output[VIDEO_PORT], &mirror);
+    status = mmal_port_parameter_set(camera->output[VIDEO_PORT],
+        (MMAL_PARAMETER_HEADER_T *)&mirror);
     MMAL_STATUS("Could not set flip (" SS(VIDEO_PORT) ")");
     status = mmal_port_parameter_set(camera->output[CAPTURE_PORT], &mirror.hdr);
     MMAL_STATUS("Could not set flip (" SS(CAPTURE_PORT) ")");
@@ -761,7 +789,8 @@ void cam_set_roi() {
     crop.rect.y = cset.roi_y;
     crop.rect.width = cset.roi_w;
     crop.rect.height = cset.roi_h;
-    status = mmal_port_parameter_set(camera->control, &crop);
+    status = mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&crop);
     MMAL_STATUS("Could not set sensor area");
 }
 
@@ -807,7 +836,7 @@ void cam_set_annotation() {
     if (cfg_stru[c_annotation]) {
         currTime = time(NULL);
         gmTime = gmtime(&currTime);
-        if (localTime->tm_sec != prev_sec) {
+        if (gmTime->tm_sec != prev_sec) {
             video_frame = 0;
         }
         asprintf(&filename_temp, cset.annotation,
@@ -837,16 +866,19 @@ void cam_set_annotation() {
     }
 
 
-    status = mmal_port_parameter_set(camera->control, &anno);
+    status = mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&anno);
     MMAL_STATUS("Could not set annotation");
 }
+
+void jpegencoder_input_callback(MMAL_PORT_T *, MMAL_BUFFER_HEADER_T *);
+void h264_enable_output(void);
+void setup_motiondetect(void);
 
 void start_all(int load_conf) {
     int max, i, h264_size;
     unsigned int height_temp;
     MMAL_ES_FORMAT_T *format;
-    VCOS_STATUS_T vcos_status;
-    MMAL_BUFFER_HEADER_T *jpegbuffer2;
     MMAL_PARAMETER_INT32_T cam_num = { {
         MMAL_PARAMETER_CAMERA_NUM, sizeof (MMAL_PARAMETER_INT32_T)
     } };
@@ -862,13 +894,13 @@ void start_all(int load_conf) {
     } };
     MMAL_PARAMETER_VIDEO_PROFILE_T vp = {
         { MMAL_PARAMETER_PROFILE, sizeof (MMAL_PARAMETER_VIDEO_PROFILE_T) },
-        { MMAL_VIDEO_PROFILE_H264_HIGH, MMAL_VIDEO_LEVEL_H264_4 }
+        { { MMAL_VIDEO_PROFILE_H264_HIGH, MMAL_VIDEO_LEVEL_H264_4 } }
     };
 
     set_counts();
 
     // reload config if requested
-    if (load_conf != 0) {
+    if (load_conf) {
         read_config(MJPG_DEF_CFG_FILE, 1);
         if (cfg_stru[c_user_config]) {
             read_config(cfg_stru[c_user_config],0);
@@ -885,7 +917,7 @@ void start_all(int load_conf) {
         MMAL_STATUS("Could not select camera");
         if (!camera->output_num) {
             status = MMAL_ENOSYS;
-            error("Camera doesn't have output ports", __function__, __LINE__);
+            error("Camera doesn't have output ports", __FUNCTION__, __LINE__);
         }
     }
     status = mmal_port_enable(camera->control, camera_control_callback);
@@ -901,7 +933,8 @@ void start_all(int load_conf) {
     cam_config.stills_capture_circular_buffer_height = 0;
     cam_config.fast_preview_resume = 0;
     cam_config.use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC;
-    mmal_port_parameter_set(camera->control, &cam_config);
+    mmal_port_parameter_set(camera->control,
+        (MMAL_PARAMETER_HEADER_T *)&cam_config);
 
     format = camera->output[PREVIEW_PORT]->format;
     format->es->video.width = VCOS_ALIGN_UP(cfg_val[c_video_width], 32);
@@ -977,8 +1010,10 @@ void start_all(int load_conf) {
         status = mmal_port_format_commit(jpegencoder->input[0]);
         MMAL_STATUS("Could not set preview image input format");
 
-        jpegencoder->input[0]->buffer_num = jpegencoder->input[0]->buffer_num_min;
-        jpegencoder->input[0]->buffer_size = jpegencoder->input[0]->buffer_size_min;
+        jpegencoder->input[0]->buffer_num =
+            jpegencoder->input[0]->buffer_num_min;
+        jpegencoder->input[0]->buffer_size =
+            jpegencoder->input[0]->buffer_size_min;
         pool_jpegencoder_in =
             mmal_pool_create(jpegencoder->input[0]->buffer_num,
                 jpegencoder->input[0]->buffer_size);
@@ -1092,13 +1127,16 @@ void start_all(int load_conf) {
     status = mmal_port_format_commit(h264encoder->output[0]);
     MMAL_STATUS("Could not set video format");
 
-    status = mmal_port_parameter_set(h264encoder->output[0], &veiq);
+    status = mmal_port_parameter_set(h264encoder->output[0],
+        (MMAL_PARAMETER_HEADER_T *)&veiq);
     MMAL_STATUS("Could not set video quantisation 1");
 
-    status = mmal_port_parameter_set(h264encoder->output[0], &veqp);
+    status = mmal_port_parameter_set(h264encoder->output[0],
+        (MMAL_PARAMETER_HEADER_T *)&veqp);
     MMAL_STATUS("Could not set video quantisation 2");
 
-    status = mmal_port_parameter_set(h264encoder->output[0], &vp);
+    status = mmal_port_parameter_set(h264encoder->output[0],
+        (MMAL_PARAMETER_HEADER_T *)&vp);
     MMAL_STATUS("Could not set video port format");
 
     status = mmal_port_parameter_set_boolean(h264encoder->input[0],
@@ -1125,7 +1163,7 @@ void start_all(int load_conf) {
     height_temp = VCOS_ALIGN_UP(cfg_val[c_width] * cfg_val[c_video_height] /
         cfg_val[c_video_width], 16);
     status = mmal_component_create("vc.ril.resize", &resizer);
-    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS)),
+    TESTERR((status != MMAL_SUCCESS) && (status != MMAL_ENOSYS),
         "Could not create image resizer");
 
     format = resizer->output[0]->format;
@@ -1204,6 +1242,7 @@ void start_all(int load_conf) {
             MMAL_STATUS("Could not create connection resizer -> encoder");
             status = mmal_connection_enable(con_res_jpeg);
             MMAL_STATUS("Could not enable connection resizer -> encoder");
+        }
     } else {
         status = mmal_connection_create(&con_cam_pre, camera->output[0],
             h264encoder->input[0], MMAL_CONNECTION_FLAG_TUNNELLING |
@@ -1257,31 +1296,34 @@ void start_all(int load_conf) {
     }
 
     // settings
-    cam_set_rational(cset.sharpness, MMAL_PARAMETER_SHARPNESS);
+    cam_set_sharpness();
     cam_set_contrast();
     cam_set_brightness();
     cam_set_saturation();
     cam_set_iso();
-    cam_set_video_stabilisation();
-    cam_set_exposure_compensation();
-    cam_set_raw_layer();
-    cam_set_shutter_speed();
-    cam_set_image_quality();
-    cam_set_video_buffer();
+    cam_set_vs();
+    cam_set_ec();
+    cam_set_raw();
+    cam_set_ss();
+    cam_set_quality();
+    // cam_set_video_buffer(); // I can't find this and it's breaking the build.
     cam_set_rotation();
-    cam_set_exposure_mode();
-    cam_set_white_balance();
-    cam_set_metering_mode();
-    cam_set_image_effect();
-    cam_set_colour_effect_en();
-    cam_set_hflip();
-    cam_set_autowbgain_r();
+    cam_set_em();
+    cam_set_wb();
+    cam_set_mm();
+    cam_set_ie();
+    cam_set_ce();
+    // cam_set_hflip(); // Ditto.
+    // cam_set_autowbgain_r(); // And this.
     cam_set_roi();
     cam_set_bitrate();
     cam_set_annotation();
 
     setup_motiondetect();
 }
+
+void stop_video(unsigned char);
+void cam_stop_buffering(void);
 
 void stop_all(void) {
     // Make sure any current recording is terminated before starting this
@@ -1401,7 +1443,7 @@ void stop_all(void) {
     }
     if (con_cam_h264 != NULL) {
         mmal_connection_destroy(con_cam_h264);
-        con_cam_h264 = NULL
+        con_cam_h264 = NULL;
     }
 
     // cleanup semaphores
@@ -1422,7 +1464,7 @@ void capt_img(void) {
         TESTERR((limit > 0) && ((buf.f_bsize * buf.f_bavail) < limit),
             "Insufficient disk space");
     } else {
-        error("statvfs", __function__, __LINE__);
+        error("statvfs", __FUNCTION__, __LINE__);
     }
     jpegoutput2_file = fopen(filename_temp, "wb");
     free(filename_temp);
@@ -1501,16 +1543,26 @@ int findNextCount(char* folder, char* source) {
     return max_count + found;
 }  
 
+void createPath(char *, char *);
+void exec_macro(char *, char *);
+void send_schedulecmd(char *);
+time_t get_mtime(const char *);
+int check_box_files(void);
+void printLog(char *, ...);
+void close_img(int);
+void start_video(unsigned char);
+
 int main(int argc, char *argv[]) {
-    int i, max, /* fd, */ length;
+    int i, max, /* fd, */ length = 0;
     /* char readbuf[60]; */
     char *filename_temp, /* *filename_recording, */ *cmd_temp;
     struct timeval now, delta, interval;
     char *bpath;
-    FILE *fp;
     struct sigaction action;
     struct timeval prev = { 0 };
-    char *line = NULL;
+    char fdName[FIFO_MAX][BUFSIZ];
+    time_t pv_time, last_pv_time = 0;
+    unsigned int onesec_check = 0;
 
     bcm_host_init();
 
@@ -1538,8 +1590,9 @@ int main(int argc, char *argv[]) {
 
     // read configs and init
     read_config(MJPG_DEF_CFG_FILE, 1);
-    if (cfg_stru[c_user_config] != 0)
+    if (cfg_stru[c_user_config] != 0) {
         read_config(cfg_stru[c_user_config], 0);
+    }
 
     createPath(cfg_stru[c_log_file], cfg_stru[c_base_path]);
     if (cfg_stru[c_boxing_path] != NULL) {
@@ -1554,7 +1607,7 @@ int main(int argc, char *argv[]) {
     if (cfg_val[c_motion_detection]) {
         TESTERR(system("motion") < 0, "Could not start Motion");
     }
-    //
+
     // init
     if (cfg_val[c_autostart]) {
         start_all(0);
@@ -1593,7 +1646,7 @@ int main(int argc, char *argv[]) {
 
     // Set up FIFO names
     if (cfg_stru[c_control_file] == 0) {
-        error("No PIPE defined", 1);
+        error("No PIPE defined", __FUNCTION__, __LINE__);
     }
     for (i = 0; i < FIFO_MAX; i++) {
         if (i == 0) {
@@ -1627,7 +1680,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (cfg_val[c_autostart]) {
-        DPRINTF(1, "MJPEG streaming, ready to receive commands\n");
+        DPUTS(1, "MJPEG streaming, ready to receive commands");
         // Kick off motion detection at start if required.
         if (cfg_val[c_motion_detection] && (cfg_val[c_motion_external] == 1)) {
             DPUTS(1, "Autostart external motion kill any runnng motion");
@@ -1645,8 +1698,9 @@ int main(int argc, char *argv[]) {
     } else {
         if (cfg_stru[c_control_file] != 0) {
             DPUTS(1, "MJPEG idle, ready to receive commands");
+        } else {
+            DPUTS(1, "MJPEG idle");
         }
-        else DPUTS(1, "MJPEG idle");
     }
 
     // Send restart signal to scheduler
@@ -1659,15 +1713,15 @@ int main(int argc, char *argv[]) {
 
         /* Start of old all-in-one processing */
         if (pipe_filename != 0) {
-            fd = open(pipe_filename, O_RDONLY | O_NONBLOCK);
-            TESTERR(fd < 0, "Could not open PIPE");
-            fcntl(fd, F_SETFL, 0);
-            length = read(fd, readbuf, 60);
-            close(fd);
+            fd[0] = open(pipe_filename, O_RDONLY | O_NONBLOCK);
+            TESTERR(fd[0] < 0, "Could not open PIPE");
+            fcntl(fd[0], F_SETFL, 0);
+            length = read(fd[0], readbuf, 60);
+            close(fd[0]);
 
             if (length) {
-                if ((readbuf[0] == 'c') && (readbuf[1] == 'a')) {
-                    if (readbuf[3] == '1') {
+                if ((readbuf[0][0] == 'c') && (readbuf[0][1] == 'a')) {
+                    if (readbuf[0][3] == '1') {
                         if (!capturing) {
                             status = mmal_component_enable(h264encoder);
                             MMAL_STATUS("Could not enable h264encoder");
@@ -1788,13 +1842,13 @@ int main(int argc, char *argv[]) {
                         }
                         capturing = 0;
                     }
-                } else if ((readbuf[0] == 'i') && (readbuf[1] == 'm')) {
+                } else if ((readbuf[0][0] == 'i') && (readbuf[0][1] == 'm')) {
                     capt_img();
-                } else if ((readbuf[0] == 't') && (readbuf[1] == 'l')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    time_between_pic = atoi(readbuf);
+                } else if ((readbuf[0][0] == 't') && (readbuf[0][1] == 'l')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    time_between_pic = atoi(&readbuf[0][2]);
                     if (time_between_pic) {
                         if (status_filename != 0) {
                             status_file = fopen(status_filename, "w");
@@ -1815,137 +1869,137 @@ int main(int argc, char *argv[]) {
                         timelapse = 0;
                         puts("Timelapse stopped");
                     }
-                } else if ((readbuf[0] == 'p') && (readbuf[1] == 'x')) {
+                } else if ((readbuf[0][0] == 'p') && (readbuf[1][0] == 'x')) {
                     stop_all();
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[7] = 0;
-                    readbuf[12] = 0;
-                    readbuf[15] = 0;
-                    readbuf[18] = 0;
-                    readbuf[23] = 0;
-                    readbuf[length] = 0;
-                    video_width = atoi(readbuf);
-                    video_height = atoi(readbuf + 8);
-                    video_fps = atoi(readbuf + 13);
-                    MP4Box_fps = atoi(readbuf + 16);
-                    image_width = atoi(readbuf + 19);
-                    image_height = atoi(readbuf + 24);
-                    start_all();
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][7] = 0;
+                    readbuf[0][12] = 0;
+                    readbuf[0][15] = 0;
+                    readbuf[0][18] = 0;
+                    readbuf[0][23] = 0;
+                    readbuf[0][length] = 0;
+                    video_width = atoi(readbuf[0]);
+                    video_height = atoi(readbuf[0] + 8);
+                    video_fps = atoi(readbuf[0] + 13);
+                    MP4Box_fps = atoi(readbuf[0] + 16);
+                    image_width = atoi(readbuf[0] + 19);
+                    image_height = atoi(readbuf[0] + 24);
+                    start_all(0);
                     puts("Changed resolutions and framerates");
-                } else if ((readbuf[0] == 'a') && (readbuf[1] == 'n')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    asprintf(&cset.annotation, "%s", readbuf + 3);
+                } else if ((readbuf[0][0] == 'a') && (readbuf[0][1] == 'n')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    asprintf(&cset.annotation, "%s", readbuf[0] + 3);
                     puts("Annotation changed");
-                } else if ((readbuf[0] == 'a') && (readbuf[1] == 'b')) {
-                    if (readbuf[3] == '0') {
+                } else if ((readbuf[0][0] == 'a') && (readbuf[0][1] == 'b')) {
+                    if (readbuf[0][3] == '0') {
                         cset.annback = 0;
                     } else {
                         cset.annback = 1;
                     }
                     puts("Annotation background changed.");
-                } else if ((readbuf[0] == 's') && (readbuf[1] == 'h')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.sharpness = atoi(readbuf);
+                } else if ((readbuf[0][0] == 's') && (readbuf[0][1] == 'h')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.sharpness = atoi(readbuf[0]);
                     cam_set_sharpness();
                     printf("Sharpness: %d\n", cset.sharpness);
-                } else if ((readbuf[0] == 'c') && (readbuf[1] == 'o')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.contrast = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'c') && (readbuf[0][1] == 'o')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.contrast = atoi(readbuf[0]);
                     cam_set_contrast();
                     printf("Contrast: %d\n", cset.contrast);
-                } else if ((readbuf[0] == 'b') && (readbuf[1] == 'r')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.brightness = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'b') && (readbuf[0][1] == 'r')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.brightness = atoi(readbuf[0]);
                     cam_set_brightness();
                     printf("Brightness: %d\n", cset.brightness);
-                } else if ((readbuf[0] == 's') && (readbuf[1] == 'a')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.saturation = atoi(readbuf);
+                } else if ((readbuf[0][0] == 's') && (readbuf[0][1] == 'a')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.saturation = atoi(readbuf[0]);
                     cam_set_saturation();
                     printf("Saturation: %d\n", cset.saturation);
-                } else if ((readbuf[0] == 'i') && (readbuf[1] == 's')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.iso = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'i') && (readbuf[0][1] == 's')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.iso = atoi(readbuf[0]);
                     cam_set_iso();
                     printf("ISO: %d\n", cset.iso);
-                } else if ((readbuf[0] == 'v') && (readbuf[1] == 's')) {
-                    if (readbuf[3] == '1')
+                } else if ((readbuf[0][0] == 'v') && (readbuf[0][1] == 's')) {
+                    if (readbuf[0][3] == '1')
                         cset.vs = 1;
                     else
                         cset.vs = 0;
                     cam_set_vs();
                     puts("Changed video stabilisation");
-                } else if ((readbuf[0] == 'r') && (readbuf[1] == 'l')) {
-                    if (readbuf[3] == '1')
+                } else if ((readbuf[0][0] == 'r') && (readbuf[0][1] == 'l')) {
+                    if (readbuf[0][3] == '1')
                         cset.raw = 1;
                     else
                         cset.raw = 0;
                     cam_set_raw();
                     puts("Changed raw layer");
-                } else if ((readbuf[0] == 'e') && (readbuf[1] == 'c')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.ec = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'e') && (readbuf[0][1] == 'c')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.ec = atoi(readbuf[0]);
                     cam_set_ec();
                     printf("Exposure compensation: %d\n", cset.ec);
-                } else if ((readbuf[0] == 'e') && (readbuf[1] == 'm')) {
-                    readbuf[length] = 0;
-                    sprintf(cset.em, "%s", readbuf + 3);
+                } else if ((readbuf[0][0] == 'e') && (readbuf[0][1] == 'm')) {
+                    readbuf[0][length] = 0;
+                    sprintf(cset.em, "%s", readbuf[0] + 3);
                     cam_set_em();
                     puts("Exposure mode changed");
-                } else if ((readbuf[0] == 'w') && (readbuf[1] == 'b')) {
-                    readbuf[length] = 0;
-                    sprintf(cset.wb, "%s", readbuf + 3);
+                } else if ((readbuf[0][0] == 'w') && (readbuf[0][1] == 'b')) {
+                    readbuf[0][length] = 0;
+                    sprintf(cset.wb, "%s", readbuf[0] + 3);
                     cam_set_wb();
                     puts("White balance changed");
-                } else if ((readbuf[0] == 'm') && (readbuf[1] == 'm')) {
-                    readbuf[length] = 0;
-                    sprintf(cset.mm, "%s", readbuf + 3);
+                } else if ((readbuf[0][0] == 'm') && (readbuf[0][1] == 'm')) {
+                    readbuf[0][length] = 0;
+                    sprintf(cset.mm, "%s", readbuf[0] + 3);
                     cam_set_mm();
                     puts("Metering mode changed");
-                } else if ((readbuf[0] == 'i') && (readbuf[1] == 'e')) {
-                    readbuf[length] = 0;
-                    sprintf(cset.ie, "%s", readbuf + 3);
+                } else if ((readbuf[0][0] == 'i') && (readbuf[0][1] == 'e')) {
+                    readbuf[0][length] = 0;
+                    sprintf(cset.ie, "%s", readbuf[0] + 3);
                     cam_set_ie();
                     puts("Image effect changed");
-                } else if ((readbuf[0] == 'c') && (readbuf[1] == 'e')) {
-                    readbuf[4] = 0;
-                    readbuf[8] = 0;
-                    readbuf[length] = 0;
-                    cset.ce_en = atoi(readbuf + 3);
-                    cset.ce_u = atoi(readbuf + 5);
-                    cset.ce_v = atoi(readbuf + 9);
+                } else if ((readbuf[0][0] == 'c') && (readbuf[0][1] == 'e')) {
+                    readbuf[0][4] = 0;
+                    readbuf[0][8] = 0;
+                    readbuf[0][length] = 0;
+                    cset.ce_en = atoi(readbuf[0] + 3);
+                    cset.ce_u = atoi(readbuf[0] + 5);
+                    cset.ce_v = atoi(readbuf[0] + 9);
                     cam_set_ce();
                     puts("Colour effect changed");
-                } else if ((readbuf[0] == 'r') && (readbuf[1] == 'o')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.rotation = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'r') && (readbuf[0][1] == 'o')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.rotation = atoi(readbuf[0]);
                     cam_set_rotation();
                     printf("Rotation: %d\n", cset.rotation);
-                } else if ((readbuf[0] == 'f') && (readbuf[1] == 'l')) {
-                    if (readbuf[3] == '0') {
+                } else if ((readbuf[0][0] == 'f') && (readbuf[0][1] == 'l')) {
+                    if (readbuf[0][3] == '0') {
                         cset.hflip = 0;
                         cset.vflip = 0;
-                    } else if (readbuf[3] == '1') {
+                    } else if (readbuf[0][3] == '1') {
                         cset.hflip = 1;
                         cset.vflip = 0;
-                    } else if (readbuf[3] == '2') {
+                    } else if (readbuf[0][3] == '2') {
                         cset.hflip = 0;
                         cset.vflip = 1;
                     } else {
@@ -1954,40 +2008,40 @@ int main(int argc, char *argv[]) {
                     }
                     cam_set_flip();
                     puts("Flip changed");
-                } else if ((readbuf[0] == 'r') && (readbuf[1] == 'i')) {
-                    readbuf[8] = 0;
-                    readbuf[14] = 0;
-                    readbuf[20] = 0;
-                    readbuf[length] = 0;
-                    cset.roi_x = strtoull(readbuf + 3, NULL, 0);
-                    cset.roi_y = strtoull(readbuf + 9, NULL, 0);
-                    cset.roi_w = strtoull(readbuf + 15, NULL, 0);
-                    cset.roi_h = strtoull(readbuf + 21, NULL, 0);
+                } else if ((readbuf[0][0] == 'r') && (readbuf[0][1] == 'i')) {
+                    readbuf[0][8] = 0;
+                    readbuf[0][14] = 0;
+                    readbuf[0][20] = 0;
+                    readbuf[0][length] = 0;
+                    cset.roi_x = strtoull(readbuf[0] + 3, NULL, 0);
+                    cset.roi_y = strtoull(readbuf[0] + 9, NULL, 0);
+                    cset.roi_w = strtoull(readbuf[0] + 15, NULL, 0);
+                    cset.roi_h = strtoull(readbuf[0] + 21, NULL, 0);
                     cam_set_roi();
                     puts("Changed Sensor Region");
-                } else if ((readbuf[0] == 's') && (readbuf[1] == 's')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.ss = strtoull(readbuf, NULL, 0);
+                } else if ((readbuf[0][0] == 's') && (readbuf[0][1] == 's')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.ss = strtoull(readbuf[0], NULL, 0);
                     cam_set_ss();
                     printf("Shutter Speed: %lu\n", cset.ss);
-                } else if ((readbuf[0] == 'q') && (readbuf[1] == 'u')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.quality = atoi(readbuf);
+                } else if ((readbuf[0][0] == 'q') && (readbuf[0][1] == 'u')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.quality = atoi(readbuf[0]);
                     cam_set_quality();
                     printf("Quality: %d\n", cset.quality);
-                } else if ((readbuf[0] == 'b') && (readbuf[1] == 'i')) {
-                    readbuf[0] = ' ';
-                    readbuf[1] = ' ';
-                    readbuf[length] = 0;
-                    cset.bitrate = strtoull(readbuf, NULL, 0);
+                } else if ((readbuf[0][0] == 'b') && (readbuf[0][1] == 'i')) {
+                    readbuf[0][0] = ' ';
+                    readbuf[0][1] = ' ';
+                    readbuf[0][length] = 0;
+                    cset.bitrate = strtoull(readbuf[0], NULL, 0);
                     cam_set_bitrate();
                     printf("Bitrate: %lu\n", cset.bitrate);
-                } else if ((readbuf[0] == 'r') && (readbuf[1] == 'u')) {
-                    if (readbuf[3] == '0') {
+                } else if ((readbuf[0][0] == 'r') && (readbuf[0][1] == 'u')) {
+                    if (readbuf[0][3] == '0') {
                         stop_all();
                         idle = 1;
                         puts("Stream halted");
@@ -1997,7 +2051,7 @@ int main(int argc, char *argv[]) {
                             fclose(status_file);
                         }
                     } else {
-                        start_all();
+                        start_all(0);
                         idle = 0;
                         puts("Stream continued");
                         if (status_filename != 0) {
@@ -2006,12 +2060,11 @@ int main(int argc, char *argv[]) {
                             fclose(status_file);
                         }
                     }
-                } else if ((readbuf[0] == 'm') && (readbuf[1] == 'd')) {
-                    if (readbuf[3] == '0') {
+                } else if ((readbuf[0][0] == 'm') && (readbuf[0][1] == 'd')) {
+                    if (readbuf[0][3] == '0') {
                         motion_detection = 0;
                         TESTERR(system("pkill motion") < 0,
                             "Could not stop Motion");
-                        }
                         puts("Motion detection stopped");
                         if (status_filename != 0) {
                             status_file = fopen(status_filename, "w");
@@ -2047,7 +2100,7 @@ int main(int argc, char *argv[]) {
 
         /* Start of new broken-out processing */
         // check to see if image preview changing
-        if (!idle && cfg_val[c_watchdog_interval] > 0) {
+        if (!idle && (cfg_val[c_watchdog_interval] > 0)) {
             if (watchdog++ > cfg_val[c_watchdog_interval]) {
                 watchdog = 0;
                 pv_time = get_mtime(cfg_stru[c_preview_path]);
@@ -2093,7 +2146,7 @@ int main(int argc, char *argv[]) {
                     stop_video(0);
                     if (cfg_val[c_video_split] > 0) {
                         video_stoptime = time(NULL) + cfg_val[c_video_split];
-                        DPRINTF(1, "Restarting next split of %d seconds\n",
+                        DPRINTF(1, "Restarting next split of %ld seconds\n",
                             cfg_val[c_video_split]);
                         start_video(0);
                     }
@@ -2105,7 +2158,7 @@ int main(int argc, char *argv[]) {
         usleep(100000);
     }
 
-    close(fd);
+    close(fd[0]);
     if (system("pkill motion 2> /dev/null") < 0) {
         DPERROR(1, "Could not stop external motion");
         exit(EX_OSERR);
