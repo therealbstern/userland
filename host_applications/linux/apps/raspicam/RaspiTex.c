@@ -212,28 +212,23 @@ static void update_fps()
  * @param state RASPITEX STATE
  * @return Zero if successful.
  */
-static void raspitex_do_capture(RASPITEX_STATE *state)
-{
-   uint8_t *buffer = NULL;
-   size_t size = 0;
+static void raspitex_do_capture(RASPITEX_STATE *state) {
+    uint8_t *buffer = NULL;
+    size_t size = 0;
 
-   if (state->capture.request)
-   {
-      if (state->ops.capture(state, &buffer, &size) == 0)
-      {
-         /* Pass ownership of buffer to main thread via capture state */
-         state->capture.buffer = buffer;
-         state->capture.size = size;
-      }
-      else
-      {
-         state->capture.buffer = NULL; // Null indicates an error
-         state->capture.size = 0;
-      }
+    if (state->capture.request) {
+        if (state->ops.capture(state, &buffer, &size)) {
+            state->capture.buffer = NULL; // NULL indicates an error
+            state->capture.size = 0;
+        } else {
+            /* Pass ownership of buffer to main thread via capture state */
+            state->capture.buffer = buffer;
+            state->capture.size = size;
+        }
 
-      state->capture.request = 0; // Always clear request and post sem
-      vcos_semaphore_post(&state->capture.completed_sem);
-   }
+        state->capture.request = 0; // Always clear request and post sem
+        vcos_semaphore_post(&state->capture.completed_sem);
+    }
 }
 
 /**
@@ -241,15 +236,14 @@ static void raspitex_do_capture(RASPITEX_STATE *state)
  * @param state RASPITEX STATE
  * @return Zero if successful.
  */
-static int check_egl_image(RASPITEX_STATE *state)
-{
-   if (state->egl_image == EGL_NO_IMAGE_KHR &&
-         state->y_egl_image == EGL_NO_IMAGE_KHR &&
-         state->u_egl_image == EGL_NO_IMAGE_KHR &&
-         state->v_egl_image == EGL_NO_IMAGE_KHR)
-      return -1;
-   else
-      return 0;
+static int check_egl_image(RASPITEX_STATE *state) {
+    if (state->egl_image == EGL_NO_IMAGE_KHR &&
+        state->y_egl_image == EGL_NO_IMAGE_KHR &&
+        state->u_egl_image == EGL_NO_IMAGE_KHR &&
+        state->v_egl_image == EGL_NO_IMAGE_KHR)
+        return -1;
+    else
+        return 0;
 }
 
 /**
@@ -686,19 +680,20 @@ void raspitex_stop(RASPITEX_STATE *state)
  * @param state Pointer to the GL preview state.
  * @return Zero on success, otherwise, -1 is returned
  * */
-int raspitex_start(RASPITEX_STATE *state)
-{
-   VCOS_STATUS_T status;
+int raspitex_start(RASPITEX_STATE *state) {
+    VCOS_STATUS_T status;
 
-   vcos_log_trace("%s", VCOS_FUNCTION);
-   status = vcos_thread_create(&state->preview_thread, "preview-worker",
-         NULL, preview_worker, state);
+    vcos_log_trace("%s", VCOS_FUNCTION);
+    status = vcos_thread_create(&state->preview_thread, "preview-worker",
+        NULL, preview_worker, state);
 
-   if (status != VCOS_SUCCESS)
-      vcos_log_error("%s: Failed to start worker thread %d",
+    if (status != VCOS_SUCCESS) {
+        vcos_log_error("%s: Failed to start worker thread %d",
             VCOS_FUNCTION, status);
+        return -1;
+    }
 
-   return (status == VCOS_SUCCESS ? 0 : -1);
+    return 0;
 }
 
 /**

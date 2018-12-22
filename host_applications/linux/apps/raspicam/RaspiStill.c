@@ -107,7 +107,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define FRAME_NEXT_IMMEDIATELY   6
 
 
-int mmal_status_to_int(MMAL_STATUS_T status);
+int mmal_status_to_bool(MMAL_STATUS_T status);
 static void signal_handler(int signal_number);
 
 
@@ -1832,62 +1832,54 @@ int main(int argc, const char **argv)
    // Camera and encoder are different in stills/video, but preview
    // is the same so handed off to a separate module
 
-   if ((status = create_camera_component(&state)) != MMAL_SUCCESS)
-   {
+   if ((status = create_camera_component(&state)) != MMAL_SUCCESS) {
       vcos_log_error("%s: Failed to create camera component", __func__);
       exit_code = EX_SOFTWARE;
-   }
-   else if ((!state.useGL) && (status = raspipreview_create(&state.preview_parameters)) != MMAL_SUCCESS)
-   {
+   } else if ((!state.useGL) && (status = raspipreview_create(&state.preview_parameters)) != MMAL_SUCCESS) {
       vcos_log_error("%s: Failed to create preview component", __func__);
       destroy_camera_component(&state);
       exit_code = EX_SOFTWARE;
-   }
-   else if ((status = create_encoder_component(&state)) != MMAL_SUCCESS)
-   {
+   } else if ((status = create_encoder_component(&state)) != MMAL_SUCCESS) {
       vcos_log_error("%s: Failed to create encode component", __func__);
       raspipreview_destroy(&state.preview_parameters);
       destroy_camera_component(&state);
       exit_code = EX_SOFTWARE;
-   }
-   else
-   {
+   } else {
       PORT_USERDATA callback_data;
 
       if (state.verbose)
          fprintf(stderr, "Starting component connection stage\n");
 
       camera_preview_port = state.camera_component->output[MMAL_CAMERA_PREVIEW_PORT];
-      camera_video_port   = state.camera_component->output[MMAL_CAMERA_VIDEO_PORT];
-      camera_still_port   = state.camera_component->output[MMAL_CAMERA_CAPTURE_PORT];
-      encoder_input_port  = state.encoder_component->input[0];
+      camera_video_port = state.camera_component->output[MMAL_CAMERA_VIDEO_PORT];
+      camera_still_port = state.camera_component->output[MMAL_CAMERA_CAPTURE_PORT];
+      encoder_input_port = state.encoder_component->input[0];
       encoder_output_port = state.encoder_component->output[0];
 
-      if (! state.useGL)
-      {
+      if (!state.useGL) {
          if (state.verbose)
             fprintf(stderr, "Connecting camera preview port to video render.\n");
 
          // Note we are lucky that the preview and null sink components use the same input port
          // so we can simple do this without conditionals
-         preview_input_port  = state.preview_parameters.preview_component->input[0];
+         preview_input_port = state.preview_parameters.preview_component->input[0];
 
          // Connect camera to preview (which might be a null_sink if no preview required)
          status = connect_ports(camera_preview_port, preview_input_port, &state.preview_connection);
       }
 
-      if (status == MMAL_SUCCESS)
-      {
+      if (status == MMAL_SUCCESS) {
          VCOS_STATUS_T vcos_status;
 
-         if (state.verbose)
-            fprintf(stderr, "Connecting camera stills port to encoder input port\n");
+         if (state.verbose) {
+            fprintf(stderr,
+                "Connecting camera stills port to encoder input port\n");
+         }
 
          // Now connect the camera to the encoder
          status = connect_ports(camera_still_port, encoder_input_port, &state.encoder_connection);
 
-         if (status != MMAL_SUCCESS)
-         {
+         if (status != MMAL_SUCCESS) {
             vcos_log_error("%s: Failed to connect camera video port to encoder input", __func__);
             goto error;
          }
@@ -1910,19 +1902,15 @@ int main(int argc, const char **argv)
             goto error;
          }
 
-         if (state.demoMode)
-         {
+         if (state.demoMode) {
             // Run for the user specific time..
             int num_iterations = state.timeout / state.demoInterval;
             int i;
-            for (i=0;i<num_iterations;i++)
-            {
+            for (i=0;i<num_iterations;i++) {
                raspicamcontrol_cycle_test(state.camera_component);
                vcos_sleep(state.demoInterval);
             }
-         }
-         else
-         {
+         } else {
             int frame, keep_looping = 1;
             FILE *output_file = NULL;
             char *use_filename = NULL;      // Temporary filename while image being written
@@ -2029,7 +2017,7 @@ int main(int argc, const char **argv)
                   }
 
                   // There is a possibility that shutter needs to be set each loop.
-                  if (mmal_status_to_int(mmal_port_parameter_set_uint32(state.camera_component->control, MMAL_PARAMETER_SHUTTER_SPEED, state.camera_parameters.shutter_speed)) != MMAL_SUCCESS)
+                  if (mmal_status_to_bool(mmal_port_parameter_set_uint32(state.camera_component->control, MMAL_PARAMETER_SHUTTER_SPEED, state.camera_parameters.shutter_speed)) != MMAL_SUCCESS)
                      vcos_log_error("Unable to set shutter speed");
 
 
@@ -2117,13 +2105,13 @@ int main(int argc, const char **argv)
       }
       else
       {
-         mmal_status_to_int(status);
+         mmal_status_to_bool(status);
          vcos_log_error("%s: Failed to connect camera to preview", __func__);
       }
 
 error:
 
-      mmal_status_to_int(status);
+      mmal_status_to_bool(status);
 
       if (state.verbose)
          fprintf(stderr, "Closing down\n");

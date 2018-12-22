@@ -100,7 +100,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define FRAME_NEXT_SIGNAL        5
 #define FRAME_NEXT_IMMEDIATELY   6
 
-int mmal_status_to_int(MMAL_STATUS_T status);
+int mmal_status_to_bool(MMAL_STATUS_T status);
 static void signal_handler(int signal_number);
 
 /** Structure containing all state information for the current run
@@ -1358,7 +1358,7 @@ int main(int argc, const char **argv)
                int num, q;
 
                // There is a possibility that shutter needs to be set each loop.
-               if (mmal_status_to_int(mmal_port_parameter_set_uint32(state.camera_component->control, MMAL_PARAMETER_SHUTTER_SPEED, state.camera_parameters.shutter_speed) != MMAL_SUCCESS))
+               if (mmal_status_to_bool(mmal_port_parameter_set_uint32(state.camera_component->control, MMAL_PARAMETER_SHUTTER_SPEED, state.camera_parameters.shutter_speed) != MMAL_SUCCESS))
                   vcos_log_error("Unable to set shutter speed");
 
 
@@ -1427,13 +1427,13 @@ int main(int argc, const char **argv)
       }
       else
       {
-         mmal_status_to_int(status);
+         mmal_status_to_bool(status);
          vcos_log_error("%s: Failed to connect camera to preview", __func__);
       }
 
 error:
 
-      mmal_status_to_int(status);
+      mmal_status_to_bool(status);
 
       if (state.verbose)
          fprintf(stderr, "Closing down\n");

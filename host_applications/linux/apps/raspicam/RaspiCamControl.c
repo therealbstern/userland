@@ -927,34 +927,37 @@ void raspicamcontrol_dump_parameters(const RASPICAM_CAMERA_PARAMETERS *params)
  * @param status The error code to convert
  * @return 0 if status is success, 1 otherwise
  */
-int mmal_status_to_int(MMAL_STATUS_T status)
-{
-   if (status == MMAL_SUCCESS)
-      return 0;
-   else
-   {
-      switch (status)
-      {
-      case MMAL_ENOMEM :   vcos_log_error("Out of memory"); break;
-      case MMAL_ENOSPC :   vcos_log_error("Out of resources (other than memory)"); break;
-      case MMAL_EINVAL:    vcos_log_error("Argument is invalid"); break;
-      case MMAL_ENOSYS :   vcos_log_error("Function not implemented"); break;
-      case MMAL_ENOENT :   vcos_log_error("No such file or directory"); break;
-      case MMAL_ENXIO :    vcos_log_error("No such device or address"); break;
-      case MMAL_EIO :      vcos_log_error("I/O error"); break;
-      case MMAL_ESPIPE :   vcos_log_error("Illegal seek"); break;
-      case MMAL_ECORRUPT : vcos_log_error("Data is corrupt \attention FIXME: not POSIX"); break;
-      case MMAL_ENOTREADY :vcos_log_error("Component is not ready \attention FIXME: not POSIX"); break;
-      case MMAL_ECONFIG :  vcos_log_error("Component is not configured \attention FIXME: not POSIX"); break;
-      case MMAL_EISCONN :  vcos_log_error("Port is already connected "); break;
-      case MMAL_ENOTCONN : vcos_log_error("Port is disconnected"); break;
-      case MMAL_EAGAIN :   vcos_log_error("Resource temporarily unavailable. Try again later"); break;
-      case MMAL_EFAULT :   vcos_log_error("Bad address"); break;
-      default :            vcos_log_error("Unknown status error"); break;
-      }
-
-      return 1;
-   }
+int mmal_status_to_bool(MMAL_STATUS_T status) {
+    switch (status) {
+        case MMAL_SUCCESS: return 0;
+        case MMAL_ENOMEM: vcos_log_error("Out of memory"); break;
+        case MMAL_ENOSPC:
+            vcos_log_error("Out of resources (other than memory)");
+            break;
+        case MMAL_EINVAL: vcos_log_error("Argument is invalid"); break;
+        case MMAL_ENOSYS: vcos_log_error("Function not implemented"); break;
+        case MMAL_ENOENT: vcos_log_error("No such file or directory"); break;
+        case MMAL_ENXIO: vcos_log_error("No such device or address"); break;
+        case MMAL_EIO: vcos_log_error("I/O error"); break;
+        case MMAL_ESPIPE: vcos_log_error("Illegal seek"); break;
+        case MMAL_ECORRUPT:
+            vcos_log_error("Data is corrupt \attention FIXME: not POSIX");
+            break;
+        case MMAL_ENOTREADY:
+            vcos_log_error("Component isn't ready \attention FIXME: not POSIX");
+            break;
+        case MMAL_ECONFIG:
+            vcos_log_error("Component isn't configured \attention FIXME: not POSIX");
+            break;
+        case MMAL_EISCONN: vcos_log_error("Port is already connected "); break;
+        case MMAL_ENOTCONN: vcos_log_error("Port is disconnected"); break;
+        case MMAL_EAGAIN:
+            vcos_log_error("Resource temporarily unavailable");
+            break;
+        case MMAL_EFAULT: vcos_log_error("Bad address"); break;
+        default: vcos_log_error("Unknown status error %d", status); break;
+    }
+    return 1;
 }
 
 /**
@@ -1087,7 +1090,7 @@ int raspicamcontrol_set_saturation(MMAL_COMPONENT_T *camera, int saturation)
    if (saturation >= -100 && saturation <= 100)
    {
       MMAL_RATIONAL_T value = {saturation, 100};
-      ret = mmal_status_to_int(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_SATURATION, value));
+      ret = mmal_status_to_bool(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_SATURATION, value));
    }
    else
    {
@@ -1113,7 +1116,7 @@ int raspicamcontrol_set_sharpness(MMAL_COMPONENT_T *camera, int sharpness)
    if (sharpness >= -100 && sharpness <= 100)
    {
       MMAL_RATIONAL_T value = {sharpness, 100};
-      ret = mmal_status_to_int(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_SHARPNESS, value));
+      ret = mmal_status_to_bool(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_SHARPNESS, value));
    }
    else
    {
@@ -1140,7 +1143,7 @@ int raspicamcontrol_set_contrast(MMAL_COMPONENT_T *camera, int contrast)
    if (contrast >= -100 && contrast <= 100)
    {
       MMAL_RATIONAL_T value = {contrast, 100};
-      ret = mmal_status_to_int(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_CONTRAST, value));
+      ret = mmal_status_to_bool(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_CONTRAST, value));
    }
    else
    {
@@ -1167,7 +1170,7 @@ int raspicamcontrol_set_brightness(MMAL_COMPONENT_T *camera, int brightness)
    if (brightness >= 0 && brightness <= 100)
    {
       MMAL_RATIONAL_T value = {brightness, 100};
-      ret = mmal_status_to_int(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_BRIGHTNESS, value));
+      ret = mmal_status_to_bool(mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_BRIGHTNESS, value));
    }
    else
    {
@@ -1189,7 +1192,7 @@ int raspicamcontrol_set_ISO(MMAL_COMPONENT_T *camera, int ISO)
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set_uint32(camera->control, MMAL_PARAMETER_ISO, ISO));
+   return mmal_status_to_bool(mmal_port_parameter_set_uint32(camera->control, MMAL_PARAMETER_ISO, ISO));
 }
 
 /**
@@ -1209,7 +1212,7 @@ int raspicamcontrol_set_metering_mode(MMAL_COMPONENT_T *camera, MMAL_PARAM_EXPOS
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &meter_mode.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &meter_mode.hdr));
 }
 
 
@@ -1224,7 +1227,7 @@ int raspicamcontrol_set_video_stabilisation(MMAL_COMPONENT_T *camera, int vstabi
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set_boolean(camera->control, MMAL_PARAMETER_VIDEO_STABILISATION, vstabilisation));
+   return mmal_status_to_bool(mmal_port_parameter_set_boolean(camera->control, MMAL_PARAMETER_VIDEO_STABILISATION, vstabilisation));
 }
 
 /**
@@ -1238,7 +1241,7 @@ int raspicamcontrol_set_exposure_compensation(MMAL_COMPONENT_T *camera, int exp_
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set_int32(camera->control, MMAL_PARAMETER_EXPOSURE_COMP , exp_comp));
+   return mmal_status_to_bool(mmal_port_parameter_set_int32(camera->control, MMAL_PARAMETER_EXPOSURE_COMP , exp_comp));
 }
 
 
@@ -1269,7 +1272,7 @@ int raspicamcontrol_set_exposure_mode(MMAL_COMPONENT_T *camera, MMAL_PARAM_EXPOS
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &exp_mode.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &exp_mode.hdr));
 }
 
 
@@ -1291,7 +1294,7 @@ int raspicamcontrol_set_flicker_avoid_mode(MMAL_COMPONENT_T *camera, MMAL_PARAM_
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &fl_mode.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &fl_mode.hdr));
 }
 
 
@@ -1318,7 +1321,7 @@ int raspicamcontrol_set_awb_mode(MMAL_COMPONENT_T *camera, MMAL_PARAM_AWBMODE_T 
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &param.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &param.hdr));
 }
 
 int raspicamcontrol_set_awb_gains(MMAL_COMPONENT_T *camera, float r_gain, float b_gain)
@@ -1334,7 +1337,7 @@ int raspicamcontrol_set_awb_gains(MMAL_COMPONENT_T *camera, float r_gain, float 
    param.r_gain.num = (unsigned int)(r_gain * 65536);
    param.b_gain.num = (unsigned int)(b_gain * 65536);
    param.r_gain.den = param.b_gain.den = 65536;
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &param.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &param.hdr));
 }
 
 /**
@@ -1373,7 +1376,7 @@ int raspicamcontrol_set_imageFX(MMAL_COMPONENT_T *camera, MMAL_PARAM_IMAGEFX_T i
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &imgFX.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &imgFX.hdr));
 }
 
 /* TODO :what to do with the image effects parameters?
@@ -1399,7 +1402,7 @@ int raspicamcontrol_set_colourFX(MMAL_COMPONENT_T *camera, const MMAL_PARAM_COLO
    colfx.u = colourFX->u;
    colfx.v = colourFX->v;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &colfx.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &colfx.hdr));
 
 }
 
@@ -1526,7 +1529,7 @@ int raspicamcontrol_zoom_in_zoom_out(MMAL_COMPONENT_T *camera, ZOOM_COMMAND_T zo
         crop.rect.y = centered_top_coordinate;
     }
 
-    int ret = mmal_status_to_int(mmal_port_parameter_set(camera->control, &crop.hdr));
+    int ret = mmal_status_to_bool(mmal_port_parameter_set(camera->control, &crop.hdr));
 
     if (ret == 0) {
        roi->x = roi->y = (double)crop.rect.x/65536;
@@ -1552,7 +1555,7 @@ int raspicamcontrol_set_shutter_speed(MMAL_COMPONENT_T *camera, int speed)
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set_uint32(camera->control, MMAL_PARAMETER_SHUTTER_SPEED, speed));
+   return mmal_status_to_bool(mmal_port_parameter_set_uint32(camera->control, MMAL_PARAMETER_SHUTTER_SPEED, speed));
 }
 
 /**
@@ -1573,7 +1576,7 @@ int raspicamcontrol_set_DRC(MMAL_COMPONENT_T *camera, MMAL_PARAMETER_DRC_STRENGT
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &drc.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &drc.hdr));
 }
 
 int raspicamcontrol_set_stats_pass(MMAL_COMPONENT_T *camera, int stats_pass)
@@ -1581,7 +1584,7 @@ int raspicamcontrol_set_stats_pass(MMAL_COMPONENT_T *camera, int stats_pass)
    if (!camera)
       return 1;
 
-   return mmal_status_to_int(mmal_port_parameter_set_boolean(camera->control, MMAL_PARAMETER_CAPTURE_STATS_PASS, stats_pass));
+   return mmal_status_to_bool(mmal_port_parameter_set_boolean(camera->control, MMAL_PARAMETER_CAPTURE_STATS_PASS, stats_pass));
 }
 
 
@@ -1686,7 +1689,7 @@ int raspicamcontrol_set_annotate(MMAL_COMPONENT_T *camera, const int settings, c
     else
        annotate.enable = 0;
 
-   return mmal_status_to_int(mmal_port_parameter_set(camera->control, &annotate.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(camera->control, &annotate.hdr));
 }
 
 int raspicamcontrol_set_stereo_mode(MMAL_PORT_T *port, MMAL_PARAMETER_STEREOSCOPIC_MODE_T *stereo_mode)
@@ -1699,7 +1702,7 @@ int raspicamcontrol_set_stereo_mode(MMAL_PORT_T *port, MMAL_PARAMETER_STEREOSCOP
       stereo.decimate = stereo_mode->decimate;
       stereo.swap_eyes = stereo_mode->swap_eyes;
    }
-   return mmal_status_to_int(mmal_port_parameter_set(port, &stereo.hdr));
+   return mmal_status_to_bool(mmal_port_parameter_set(port, &stereo.hdr));
 }
 
 int raspicamcontrol_set_gains(MMAL_COMPONENT_T *camera, float analog, float digital)
@@ -1713,11 +1716,11 @@ int raspicamcontrol_set_gains(MMAL_COMPONENT_T *camera, float analog, float digi
    rational.num = (unsigned int)(analog * 65536);
    status = mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_ANALOG_GAIN, rational);
    if (status != MMAL_SUCCESS)
-      return mmal_status_to_int(status);
+      return mmal_status_to_bool(status);
 
    rational.num = (unsigned int)(digital * 65536);
    status = mmal_port_parameter_set_rational(camera->control, MMAL_PARAMETER_DIGITAL_GAIN, rational);
-   return mmal_status_to_int(status);
+   return mmal_status_to_bool(status);
 }
 
 /**
@@ -1739,35 +1742,38 @@ static int raspicamcontrol_get_mem_gpu(void)
  * @param supported None-zero if software supports the camera 
  * @param detected  None-zero if a camera has been detected
  */
-static void raspicamcontrol_get_camera(int *supported, int *detected)
-{
-   char response[80] = "";
-   if (vc_gencmd(response, sizeof response, "get_camera") == 0)
-   {
-      if (supported)
-         vc_gencmd_number_property(response, "supported", supported);
-      if (detected)
-         vc_gencmd_number_property(response, "detected", detected);
-   }
+static void raspicamcontrol_get_camera(int *supported, int *detected) {
+    char response[80] = { 0 };
+
+    if (vc_gencmd(response, sizeof response, "get_camera") == 0) {
+        if (supported != NULL) {
+            vc_gencmd_number_property(response, "supported", supported);
+        }
+        if (detected != NULL) {
+            vc_gencmd_number_property(response, "detected", detected);
+        }
+    }
 }
 
 /**
- * Check to see if camera is supported, and we have allocated enough meooryAsk GPU about its camera abilities
+ * Check to see if camera is supported, and we have allocated enough memory.
+ * Ask GPU about its camera abilities.
  * @param supported None-zero if software supports the camera 
  * @param detected  None-zero if a camera has been detected
  */
-void raspicamcontrol_check_configuration(int min_gpu_mem)
-{
-   int gpu_mem = raspicamcontrol_get_mem_gpu();
-   int supported = 0, detected = 0;
-   raspicamcontrol_get_camera(&supported, &detected);
-   if (!supported)
-      vcos_log_error("Camera is not enabled in this build. Try running \"sudo raspi-config\" and ensure that \"camera\" has been enabled\n");
-   else if (gpu_mem < min_gpu_mem)
-      vcos_log_error("Only %dM of gpu_mem is configured. Try running \"sudo raspi-config\" and ensure that \"memory_split\" has a value of %d or greater\n", gpu_mem, min_gpu_mem);
-   else if (!detected)
-      vcos_log_error("Camera is not detected. Please check carefully the camera module is installed correctly\n");
-   else
-      vcos_log_error("Failed to run camera app. Please check for firmware updates\n");
-}
+void raspicamcontrol_check_configuration(int min_gpu_mem) {
+    int gpu_mem;
+    int supported = 0, detected = 0;
 
+    gpu_mem = raspicamcontrol_get_mem_gpu();
+    raspicamcontrol_get_camera(&supported, &detected);
+    if (!supported) {
+        vcos_log_error("Camera is not enabled in this build. Try running \"sudo raspi-config\" and ensure that \"camera\" has been enabled\n");
+    } else if (gpu_mem < min_gpu_mem) {
+        vcos_log_error("Only %dM of gpu_mem is configured. Try running \"sudo raspi-config\" and ensure that \"memory_split\" has a value of %d or greater\n", gpu_mem, min_gpu_mem);
+    } else if (!detected) {
+        vcos_log_error("Camera is not detected. Please check carefully the camera module is installed correctly\n");
+    } else {
+        vcos_log_error("Failed to run camera app. Please check for firmware updates\n");
+    }
+}
