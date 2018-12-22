@@ -129,7 +129,7 @@ const int ABORT_INTERVAL = 100; // ms
 
 
 
-int mmal_status_to_int(MMAL_STATUS_T status);
+int mmal_status_to_bool(MMAL_STATUS_T status);
 static void signal_handler(int signal_number);
 
 // Forward
@@ -2932,7 +2932,7 @@ int main(int argc, const char **argv)
       }
       else
       {
-         mmal_status_to_int(status);
+         mmal_status_to_bool(status);
          vcos_log_error("%s: Failed to connect camera to preview", __func__);
       }
 
@@ -2958,7 +2958,7 @@ int main(int argc, const char **argv)
 
 error:
 
-      mmal_status_to_int(status);
+      mmal_status_to_bool(status);
 
       if (state.verbose)
          fprintf(stderr, "Closing down\n");
