@@ -89,7 +89,7 @@ unsigned char *load_tga(const char *filename, struct tga_header *header) {
     unsigned char *image = NULL;
     FILE *fp = fopen(filename, "r");
     if (fp) {
-        if(read_header(fp, header) == 0) {
+        if (!read_header(fp, header)) {
             if (header->image_type == tga_type_true_color &&
                 (header->image_info.bpp == 24 ||
                 header->image_info.bpp == 32)) {

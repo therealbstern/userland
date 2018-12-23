@@ -47,8 +47,7 @@ extern VCOS_LOG_CAT_T raspitex_log_category;
  * Container for a simple shader program. The uniform and attribute locations
  * are automatically setup by raspitex_build_shader_program.
  */
-typedef struct RASPITEXUTIL_SHADER_PROGRAM_T
-{
+typedef struct RASPITEXUTIL_SHADER_PROGRAM_T {
    const char *vertex_source;       /// Pointer to vertex shader source
    const char *fragment_source;     /// Pointer to fragment shader source
 
@@ -73,7 +72,7 @@ typedef struct RASPITEXUTIL_SHADER_PROGRAM_T
 //#define CHECK_GL_ERRORS
 #if defined(CHECK_GL_ERRORS)
 #define GLCHK(X) \
-do { \
+ do { \
     GLenum err = GL_NO_ERROR; \
     X; \
    while ((err = glGetError())) \
@@ -82,8 +81,8 @@ do { \
       vcos_assert(err == GL_NO_ERROR); \
       exit(err); \
    } \
-} \
-while(0)
+  } \
+ while(0)
 #else
 #define GLCHK(X) X
 #endif /* CHECK_GL_ERRORS */

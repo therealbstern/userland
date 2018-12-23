@@ -52,8 +52,7 @@ typedef enum {
 
 struct RASPITEX_STATE;
 
-typedef struct RASPITEX_SCENE_OPS
-{
+typedef struct RASPITEX_SCENE_OPS {
    /// Creates a native window that will be used by egl_init
    /// to create a window surface.
    int (*create_native_window)(struct RASPITEX_STATE *state);
@@ -98,8 +97,7 @@ typedef struct RASPITEX_SCENE_OPS
    void (*close)(struct RASPITEX_STATE *state);
 } RASPITEX_SCENE_OPS;
 
-typedef struct RASPITEX_CAPTURE
-{
+typedef struct RASPITEX_CAPTURE {
    /// Wait for previous capture to complete
    VCOS_SEMAPHORE_T start_sem;
 
@@ -121,8 +119,7 @@ typedef struct RASPITEX_CAPTURE
  * Contains the internal state and configuration for the GL rendered
  * preview window.
  */
-typedef struct RASPITEX_STATE
-{
+typedef struct RASPITEX_STATE {
    int version_major;                  /// For binary compatibility
    int version_minor;                  /// Incremented for new features
    MMAL_PORT_T *preview_port;          /// Source port for preview opaque buffers

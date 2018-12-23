@@ -154,61 +154,51 @@ void raspitexutil_destroy_native_window(RASPITEX_STATE *raspitex_state)
  *                        the native_window pointer.
  * @param attribs         The config attributes.
  * @param context_attribs The context attributes.
- * @return Zero if successful.
+ * @return zero if successful.
  */
-static int raspitexutil_gl_common(RASPITEX_STATE *raspitex_state,
-      const EGLint attribs[], const EGLint context_attribs[])
-{
+static int raspitexutil_gl_common(RASPITEX_STATE *raspitex_state, const EGLint attribs[], const EGLint context_attribs[]) {
    EGLConfig config;
    EGLint num_configs;
 
    vcos_log_trace("%s", VCOS_FUNCTION);
 
-   if (raspitex_state->native_window == NULL)
-   {
+   if (raspitex_state->native_window == NULL) {
       vcos_log_error("%s: No native window", VCOS_FUNCTION);
       goto error;
    }
 
    raspitex_state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   if (raspitex_state->display == EGL_NO_DISPLAY)
-   {
+   if (raspitex_state->display == EGL_NO_DISPLAY) {
       vcos_log_error("%s: Failed to get EGL display", VCOS_FUNCTION);
       goto error;
    }
 
-   if (! eglInitialize(raspitex_state->display, 0, 0))
-   {
+   if (!eglInitialize(raspitex_state->display, 0, 0)) {
       vcos_log_error("%s: eglInitialize failed", VCOS_FUNCTION);
       goto error;
    }
 
-   if (! eglChooseConfig(raspitex_state->display, attribs, &config,
-            1, &num_configs))
-   {
+   if (!eglChooseConfig(raspitex_state->display, attribs, &config, 1, &num_configs)) {
       vcos_log_error("%s: eglChooseConfig failed", VCOS_FUNCTION);
       goto error;
    }
 
    raspitex_state->surface = eglCreateWindowSurface(raspitex_state->display,
          config, raspitex_state->native_window, NULL);
-   if (raspitex_state->surface == EGL_NO_SURFACE)
-   {
+   if (raspitex_state->surface == EGL_NO_SURFACE) {
       vcos_log_error("%s: eglCreateWindowSurface failed", VCOS_FUNCTION);
       goto error;
    }
 
    raspitex_state->context = eglCreateContext(raspitex_state->display,
          config, EGL_NO_CONTEXT, context_attribs);
-   if (raspitex_state->context == EGL_NO_CONTEXT)
-   {
+   if (raspitex_state->context == EGL_NO_CONTEXT) {
       vcos_log_error("%s: eglCreateContext failed", VCOS_FUNCTION);
       goto error;
    }
 
    if (!eglMakeCurrent(raspitex_state->display, raspitex_state->surface,
-            raspitex_state->surface, raspitex_state->context))
-   {
+           raspitex_state->surface, raspitex_state->context)) {
       vcos_log_error("%s: Failed to activate EGL context", VCOS_FUNCTION);
       goto error;
    }
@@ -225,8 +215,7 @@ error:
  * @param raspitex_state A pointer to the GL preview state.
  * @return Zero if successful.
  */
-int raspitexutil_create_textures(RASPITEX_STATE *raspitex_state)
-{
+int raspitexutil_create_textures(RASPITEX_STATE *raspitex_state) {
    GLCHK(glGenTextures(1, &raspitex_state->texture));
    GLCHK(glGenTextures(1, &raspitex_state->y_texture));
    GLCHK(glGenTextures(1, &raspitex_state->u_texture));
@@ -239,13 +228,11 @@ int raspitexutil_create_textures(RASPITEX_STATE *raspitex_state)
  * @param raspitex_state A pointer to the GL preview state.
  * @return Zero if successful.
  */
-int raspitexutil_gl_init_1_0(RASPITEX_STATE *raspitex_state)
-{
+int raspitexutil_gl_init_1_0(RASPITEX_STATE *raspitex_state) {
    int rc;
    const EGLint* attribs = raspitex_state->egl_config_attribs;
 
-   const EGLint default_attribs[] =
-   {
+   const EGLint default_attribs[] = {
       EGL_RED_SIZE,   8,
       EGL_GREEN_SIZE, 8,
       EGL_BLUE_SIZE,  8,
@@ -255,18 +242,18 @@ int raspitexutil_gl_init_1_0(RASPITEX_STATE *raspitex_state)
       EGL_NONE
    };
 
-   const EGLint context_attribs[] =
-   {
+   const EGLint context_attribs[] = {
       EGL_CONTEXT_CLIENT_VERSION, 1,
       EGL_NONE
    };
 
-   if (! attribs)
+   if (!attribs)
       attribs = default_attribs;
 
    rc = raspitexutil_gl_common(raspitex_state, attribs, context_attribs);
-   if (rc != 0)
+   if (rc) {
       goto end;
+   }
 
    GLCHK(glEnable(GL_TEXTURE_EXTERNAL_OES));
    rc = raspitexutil_create_textures(raspitex_state);
@@ -280,13 +267,11 @@ end:
  * @param raspitex_state A pointer to the GL preview state.
  * @return Zero if successful.
  */
-int raspitexutil_gl_init_2_0(RASPITEX_STATE *raspitex_state)
-{
+int raspitexutil_gl_init_2_0(RASPITEX_STATE *raspitex_state) {
    int rc;
    const EGLint* attribs = raspitex_state->egl_config_attribs;;
 
-   const EGLint default_attribs[] =
-   {
+   const EGLint default_attribs[] = {
       EGL_RED_SIZE,   8,
       EGL_GREEN_SIZE, 8,
       EGL_BLUE_SIZE,  8,
@@ -296,19 +281,20 @@ int raspitexutil_gl_init_2_0(RASPITEX_STATE *raspitex_state)
       EGL_NONE
    };
 
-   const EGLint context_attribs[] =
-   {
+   const EGLint context_attribs[] = {
       EGL_CONTEXT_CLIENT_VERSION, 2,
       EGL_NONE
    };
 
-   if (! attribs)
+   if (!attribs) {
       attribs = default_attribs;
+   }
 
    vcos_log_trace("%s", VCOS_FUNCTION);
    rc = raspitexutil_gl_common(raspitex_state, attribs, context_attribs);
-   if (rc != 0)
+   if (rc) {
       goto end;
+   }
 
    rc = raspitexutil_create_textures(raspitex_state);
 end:
@@ -473,7 +459,7 @@ int raspitexutil_capture_bgra(RASPITEX_STATE *state,
 
    *buffer_size = state->width * state->height * bytes_per_pixel;
    *buffer = calloc(*buffer_size, 1);
-   if (! *buffer)
+   if (!*buffer)
       goto error;
 
    glReadPixels(0, 0, state->width, state->height, GL_RGBA,
@@ -509,7 +495,7 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
     vcos_assert(p->vertex_source);
     vcos_assert(p->fragment_source);
 
-    if (! (p && p->vertex_source && p->fragment_source))
+    if (!(p && p->vertex_source && p->fragment_source))
         goto fail;
 
     p->vs = p->fs = 0;
@@ -518,7 +504,7 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
     glShaderSource(p->vs, 1, &p->vertex_source, NULL);
     glCompileShader(p->vs);
     glGetShaderiv(p->vs, GL_COMPILE_STATUS, &status);
-    if (! status) {
+    if (!status) {
         glGetShaderInfoLog(p->vs, sizeof(log), &logLen, log);
         vcos_log_error("Program info log %s", log);
         goto fail;
@@ -529,7 +515,7 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
     glCompileShader(p->fs);
 
     glGetShaderiv(p->fs, GL_COMPILE_STATUS, &status);
-    if (! status) {
+    if (!status) {
         glGetShaderInfoLog(p->fs, sizeof(log), &logLen, log);
         vcos_log_error("Program info log %s", log);
         goto fail;
@@ -540,17 +526,15 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
     glAttachShader(p->program, p->fs);
     glLinkProgram(p->program);
     glGetProgramiv(p->program, GL_LINK_STATUS, &status);
-    if (! status)
-    {
+    if (!status) {
         vcos_log_error("Failed to link shader program");
         glGetProgramInfoLog(p->program, sizeof(log), &logLen, log);
         vcos_log_error("Program info log %s", log);
         goto fail;
     }
 
-    for (i = 0; i < SHADER_MAX_ATTRIBUTES; ++i)
-    {
-        if (! p->attribute_names[i])
+    for (i = 0; i < SHADER_MAX_ATTRIBUTES; ++i) {
+        if (!p->attribute_names[i])
             break;
         p->attribute_locations[i] = glGetAttribLocation(p->program, p->attribute_names[i]);
         if (p->attribute_locations[i] == -1)
@@ -558,16 +542,14 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
             vcos_log_error("Failed to get location for attribute %s",
                   p->attribute_names[i]);
             goto fail;
-        }
-        else {
+        } else {
             vcos_log_trace("Attribute for %s is %d",
                   p->attribute_names[i], p->attribute_locations[i]);
         }
     }
 
-    for (i = 0; i < SHADER_MAX_UNIFORMS; ++i)
-    {
-        if (! p->uniform_names[i])
+    for (i = 0; i < SHADER_MAX_UNIFORMS; ++i) {
+        if (!p->uniform_names[i])
             break;
         p->uniform_locations[i] = glGetUniformLocation(p->program, p->uniform_names[i]);
         if (p->uniform_locations[i] == -1)
@@ -575,8 +557,7 @@ int raspitexutil_build_shader_program(RASPITEXUTIL_SHADER_PROGRAM_T *p)
             vcos_log_error("Failed to get location for uniform %s",
                   p->uniform_names[i]);
             goto fail;
-        }
-        else {
+        } else {
             vcos_log_trace("Uniform for %s is %d",
                   p->uniform_names[i], p->uniform_locations[i]);
         }
